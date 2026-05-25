@@ -1,6 +1,6 @@
 # Recovery
 
-运行恢复模块负责在服务启动、Agent Route 初始化或手动 API 调用时扫描持久化 goal/task 状态，把不可信的运行态安全收束。
+运行恢复模块负责在手动 API 调用时扫描持久化 goal/task 状态，把不可信的运行态安全收束。
 
 负责：
 
@@ -18,7 +18,7 @@
 
 入口：
 
-- `runStartupRecovery()`: Agent Route 启动/首次运行时的保守恢复。
+- `runStartupRecovery()`: 可显式调用的保守恢复；默认不阻塞 Agent Route 新任务启动。
 - `runRuntimeRecovery()`: 手动恢复扫描。
 - `recoveryStatus()`: 查看最近恢复摘要。
 

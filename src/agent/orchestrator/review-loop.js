@@ -175,6 +175,89 @@ function isVerifiedTask(task = {}) {
   );
 }
 
+function isRouteInternalTask(task = {}) {
+  if (!task || typeof task !== "object") return true;
+  if (task.internal || task.routeInternal || task.route_internal) return true;
+  return /^(?:plan|final|goal-review(?:-\d+)?)$/.test(String(task.id || ""));
+}
+
+function listValues(value = []) {
+  if (Array.isArray(value)) return value.map((item) => String(item || "")).filter(Boolean);
+  return String(value || "")
+    .split(/[\s,]+/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function taskAttemptsExhausted(task = {}) {
+  return Number(task.attempts || 0) >= Math.max(1, Number(task.maxAttempts || 1));
+}
+
+function taskHasWorkerObservation(task = {}) {
+  return Boolean(
+    Number(task.attempts || 0) > 0 ||
+    task.startedAt ||
+    task.started_at ||
+    task.finishedAt ||
+    task.finished_at ||
+    task.result ||
+    task.output ||
+    task.error ||
+    task.verificationStatus ||
+    task.verification_status
+  );
+}
+
+function isExhaustedEvidenceGapTask(task = {}) {
+  const status = String(task.status || "waiting").toLowerCase();
+  return (
+    ["needs_evidence", "retry_ready"].includes(status) && taskAttemptsExhausted(task) && taskHasWorkerObservation(task)
+  );
+}
+
+function isActionableUnresolvedTask(task = {}) {
+  const status = String(task.status || "waiting").toLowerCase();
+  if (["completed", "failed", "canceled"].includes(status)) return false;
+  return !isExhaustedEvidenceGapTask(task);
+}
+
+function taskInventoryLine(task = {}) {
+  const dependsOn = listValues(task.dependsOn || task.depends_on || task.dependencies || []);
+  const consumes = listValues(task.consumes || task.requiredArtifacts || task.required_artifacts || []);
+  const missing = listValues(task.missingArtifacts || task.missing_artifacts || []);
+  return [
+    `- ${task.id}: ${compactText(task.title || "", 120)}`,
+    `status=${task.status || "waiting"}`,
+    `attempts=${Number(task.attempts || 0)}/${Math.max(1, Number(task.maxAttempts || 1))}`,
+    `type=${task.type || "general"}`,
+    task.toolWorker ? `toolWorker=${task.toolWorker}` : "",
+    dependsOn.length ? `dependsOn=${dependsOn.join(",")}` : "",
+    consumes.length ? `consumes=${consumes.join(",")}` : "",
+    missing.length ? `missing=${missing.join(",")}` : "",
+    task.blockedReason ? `blockedReason=${compactText(task.blockedReason, 180)}` : "",
+    task.error ? `error=${compactText(task.error, 180)}` : "",
+    task.verificationReasonCode ? `verificationReason=${task.verificationReasonCode}` : ""
+  ]
+    .filter(Boolean)
+    .join(" | ");
+}
+
+function unresolvedTaskInventory(planTasks = [], limit = 12) {
+  const realTasks = (planTasks || []).filter((task) => !isRouteInternalTask(task));
+  const actionable = realTasks.filter((task) => isActionableUnresolvedTask(task)).slice(0, limit);
+  const exhaustedEvidence = realTasks.filter((task) => isExhaustedEvidenceGapTask(task)).slice(0, limit);
+  if (!actionable.length && !exhaustedEvidence.length) return "未完成真实任务清单: 无。";
+  return [
+    actionable.length ? "仍可行动/未执行真实任务清单:" : "仍可行动/未执行真实任务清单: 无。",
+    ...actionable.map(taskInventoryLine),
+    exhaustedEvidence.length ? "已执行但证据不足或尝试耗尽的任务:" : "",
+    ...exhaustedEvidence.map(taskInventoryLine),
+    "只要仍可行动/未执行清单还有任务，就不得返回 done/final_answer。已执行但证据不足的任务不能当作成功证据；必须规划恢复/替代证据，或在证据确实不可获得时诚实说明缺口。"
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
 function mergedTaskEvidence(planTasks = [], results = []) {
   const byId = new Map();
   for (const task of planTasks || []) {
@@ -268,6 +351,7 @@ function makeProgressMessages(
         "缺少文档产物时，下一步应规划 type document_generate、toolWorker document、modelPool free 的通用渲染任务，并要求 artifact path、format、size、hash、createdAt 和 file evidence。文档工具只渲染上游内容，不替你补事实。",
         "文档任务完成前必须确认文件存在、非空、格式匹配、可基本读取或解析，且内容基于上游 evidence；缺一项就 continue、blocked 或 failed，不要返回 done。",
         "review 输出描述的是下一批待执行任务，不是已完成动作。不要把未来的浏览器、shell、API 或文件步骤写成完成证据。",
+        "硬性完成条件：只要当前计划中仍有真实 worker 任务处于 waiting、running、blocked、waiting_human、awaiting_confirmation，或 retry_ready/needs_evidence 且仍有可用尝试次数，就不得返回 status done 或 final_answer；必须让任务继续执行、规划恢复/补证据任务，或让运行时明确阻塞。",
         "planning、strategy、review、verification、decision、final、summary 是元任务；它们应检查证据并决策，不能声称工具执行已经发生。",
         "不要为了写最终报告、最终答案或总结再创建普通 analysis worker；如果证据已经足够，应直接返回 status done 和 final_answer。",
         "尊重 waiting_human、approvalStatus、blockedReason 和 riskReasons；不要创建绕过风险或人工确认的 workaround 任务。",
@@ -295,6 +379,8 @@ function makeProgressMessages(
         "当前计划:",
         JSON.stringify(plan),
         strategy ? ["", "当前 strategy:", JSON.stringify(strategy)].join("\n") : "",
+        "",
+        unresolvedTaskInventory((plan && plan.tasks) || []),
         "",
         verifiedEvidenceInventory((plan && plan.tasks) || [], results),
         "",
@@ -333,6 +419,7 @@ module.exports = {
   compactWorkerResult,
   makeProgressMessages,
   normalizeGoalReview,
+  unresolvedTaskInventory,
   verifiedEvidenceInventory,
   webSourceDiagnostics
 };

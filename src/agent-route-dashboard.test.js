@@ -161,6 +161,11 @@ function testDashboardRecoverySourceWiring() {
     /blockedWhenNoSuccessfulWorkerEvidence/,
     "agent route must not produce a final answer without successful worker evidence"
   );
+  assert.match(
+    fs.readFileSync(path.join(__dirname, "agent", "orchestrator", "runtime.js"), "utf8"),
+    /finalBlockedByUnresolvedPlannedTasks/,
+    "agent route must not produce a final answer while planned tasks are unresolved"
+  );
 }
 
 function testEventStreamSummarizesFailureReason() {

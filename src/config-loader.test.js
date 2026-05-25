@@ -63,7 +63,7 @@ function testUserConfigOverridesDefaults() {
   const config = configLoader.loadRuntimeConfig({ configFile });
   assert.equal(config.maxTasks, 2);
   assert.equal(config.dynamicFreeModels, false);
-  assert.equal(config.modelPools.commander[0], "cx/test-commander");
+  assert.equal(config.modelPools.commander[0], "gpt5.5");
   assert.equal(config.modelPools.strong[0], "openrouter/test-strong");
   assert.equal(config.modelPools.free[0], "openrouter/test-free:free");
   assert.doesNotMatch(config.modelPools.coding.join(" "), /cx\/gpt-5\.5/);
@@ -94,7 +94,7 @@ function testRequestModelPoolsAllowSameModelAcrossTiers() {
       free: ["deepseek/deepseek-chat"]
     }
   });
-  assert.deepEqual(config.modelPools.commander, ["deepseek/deepseek-chat"]);
+  assert.deepEqual(config.modelPools.commander, ["gpt5.5"]);
   assert.deepEqual(config.modelPools.strong, ["deepseek/deepseek-chat"]);
   assert.deepEqual(config.modelPools.coding, ["deepseek/deepseek-chat"]);
   assert.deepEqual(config.modelPools.free, ["deepseek/deepseek-chat"]);

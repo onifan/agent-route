@@ -53,7 +53,7 @@ function setTheme(t){
   document.documentElement.dataset.theme=n;
   document.documentElement.classList.toggle("dark",n==="dark");
   try{localStorage.setItem("agent-route.theme",n)}catch{}
-  document.querySelectorAll("[data-theme-toggle] .material-symbols-outlined").forEach(function(i){i.textContent=n==="light"?"dark_mode":"light_mode"})
+  document.querySelectorAll("[data-theme-toggle] .material-symbols-outlined,[data-react-theme-toggle] .material-symbols-outlined").forEach(function(i){i.textContent=n==="light"?"dark_mode":"light_mode"})
 }
 function markIconFontReady(){document.documentElement.classList.add("fonts-loaded")}
 try{if(document.fonts&&document.fonts.ready){document.fonts.ready.then(markIconFontReady).catch(markIconFontReady)}else{setTimeout(markIconFontReady,120)}}catch{setTimeout(markIconFontReady,120)}
@@ -89,7 +89,9 @@ function switchAgentRouteSection(section){
   if(!section)return;
   var labels={
     control:["控制中心","创建目标、查看当前目标状态，并启动安全的目标驱动流程。"],
+    chat:["聊天","消息流和内部过程"],
     monitor:["监控中心","观察目标、任务、风险、验证、预算、恢复和事件时间线。"],
+    tasks:["任务视图","任务队列、依赖图和人工处理"],
     graph:["执行图","查看依赖关系、可执行任务、阻塞链和产物流向。"],
     queue:["任务队列","处理等待确认、阻塞、失败、重试和已完成任务。"],
     models:["模型管理","查看模型等级、成本状态，并调整路由配置。"],
@@ -126,7 +128,7 @@ document.addEventListener("change",function(e){
   if(e.target&&e.target.matches&&e.target.matches('select[aria-label="优先级"],select[aria-label="Priority"]'))saveDraft()
 });
 document.addEventListener("click",function(e){
-  var theme=e.target.closest("[data-theme-toggle]");
+  var theme=e.target.closest("[data-theme-toggle],[data-react-theme-toggle]");
   if(theme){setTheme(document.documentElement.dataset.theme==="light"?"dark":"light");return}
   if(e.target.closest("[data-open-sidebar]")){var openSidebar=document.querySelector(".sidebar");if(openSidebar)openSidebar.classList.add("open");return}
   if(e.target.closest("[data-close-sidebar]")){var closeSidebar=document.querySelector(".sidebar");if(closeSidebar)closeSidebar.classList.remove("open");return}
@@ -143,7 +145,6 @@ document.addEventListener("click",function(e){
 document.addEventListener("DOMContentLoaded",function(){
   setTheme(document.documentElement.dataset.theme||"dark");
   restoreDraft();
-  if(location.hash)switchAgentRouteSection(location.hash.replace(/^#/,""));
   setTimeout(restoreDraft,50);
   setTimeout(restoreDraft,250)
 });

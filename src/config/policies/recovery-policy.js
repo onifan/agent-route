@@ -2,7 +2,7 @@
 
 const DEFAULT_RECOVERY_POLICY = Object.freeze({
   enabled: true,
-  autoOnAgentRouteStart: true,
+  autoOnAgentRouteStart: false,
   runningTaskTargetStatus: "blocked",
   runningTaskReason: "process_restarted_or_worker_lost",
   retryReadyPolicy: "waiting_if_budget_allows",

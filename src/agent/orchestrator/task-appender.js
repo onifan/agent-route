@@ -129,6 +129,96 @@ function isWebToolType(type = "") {
   );
 }
 
+function webToolTypeFamily(type = "") {
+  const normalized = String(type || "").toLowerCase();
+  if (/^(api_read|http_fetch|public_api_read)$/.test(normalized)) return "api_read";
+  if (/^(web_read|web_fetch|public_web_read)$/.test(normalized)) return "web_read";
+  if (normalized === "web_search") return "web_search";
+  return normalized;
+}
+
+function isReadOnlyUrlTask(task = {}) {
+  const type = webToolTypeFamily(task.type || task.taskType);
+  return type === "web_read" || type === "api_read";
+}
+
+function extractPublicUrls(value = "") {
+  const matches = String(value || "").match(/\bhttps?:\/\/[^\s"'<>()[\]{}]+/gi) || [];
+  const urls = [];
+  const seen = new Set();
+  for (const match of matches) {
+    const clean = match.replace(/[.,;，；。]+$/g, "");
+    const key = clean.toLowerCase();
+    if (!clean || seen.has(key)) continue;
+    seen.add(key);
+    urls.push(clean);
+  }
+  return urls;
+}
+
+function canonicalTaskInput(value = "") {
+  return String(value || "")
+    .trim()
+    .replace(/\s+/g, " ")
+    .replace(/[/?#&]+$/g, "")
+    .toLowerCase();
+}
+
+function readSourceKey(task = {}) {
+  if (!isReadOnlyUrlTask(task)) return "";
+  const urls = extractPublicUrls(task.input || task.url || task.prompt || "");
+  const type = webToolTypeFamily(task.type || task.taskType);
+  if (urls.length) return `${type}:${canonicalTaskInput(urls[0])}`;
+  const input = canonicalTaskInput(task.input || "");
+  return input ? `${type}:${input}` : "";
+}
+
+function splitMultiUrlReadTasks(tasks = []) {
+  const expanded = [];
+  const split = [];
+  for (const task of tasks || []) {
+    if (!isReadOnlyUrlTask(task)) {
+      expanded.push(task);
+      continue;
+    }
+    const urls = extractPublicUrls(task.input || task.url || "");
+    if (urls.length <= 1) {
+      expanded.push(task);
+      continue;
+    }
+    split.push({ task, urls });
+    urls.forEach((url, index) => {
+      expanded.push({
+        ...task,
+        id: index === 0 ? task.id : `${task.id || task.title || "task"}-${index + 1}`,
+        title: index === 0 ? task.title : `${task.title || task.id || "读取公开来源"} ${index + 1}`,
+        input: url
+      });
+    });
+  }
+  return { tasks: expanded, split };
+}
+
+function filterDuplicateSourceTasks(tasks = [], existingTasks = []) {
+  const seen = new Map();
+  for (const task of existingTasks || []) {
+    const key = readSourceKey(task);
+    if (key && !seen.has(key)) seen.set(key, task);
+  }
+  const kept = [];
+  const pruned = [];
+  for (const task of tasks || []) {
+    const key = readSourceKey(task);
+    if (key && seen.has(key)) {
+      pruned.push({ task, sourceKey: key, existingTask: seen.get(key) });
+      continue;
+    }
+    if (key) seen.set(key, task);
+    kept.push(task);
+  }
+  return { tasks: kept, pruned };
+}
+
 function isWebToolTask(task = {}) {
   const type = String(task.type || task.taskType || "").toLowerCase();
   const toolWorker = String(task.toolWorker || task.tool_worker || "").toLowerCase();
@@ -319,6 +409,43 @@ function createTaskAppender({
       blocked_tasks: []
     });
   };
+  const emitSplitReadTasks = (split, source) => {
+    if (!split.length) return;
+    trace.push({
+      label: `split-read:${source}`,
+      model: "task-appender",
+      ok: true,
+      split: split.map((item) => ({
+        taskId: item.task.id,
+        urls: item.urls
+      }))
+    });
+  };
+  const emitDuplicateSourceTasks = (filtered, source) => {
+    if (!filtered.pruned.length) return;
+    trace.push({
+      label: `source-dedupe:${source}`,
+      model: "task-appender",
+      ok: true,
+      pruned: filtered.pruned.map((item) => ({
+        taskId: item.task.id,
+        sourceKey: item.sourceKey,
+        existingTaskId: item.existingTask && item.existingTask.id
+      }))
+    });
+    emitStrategy(strategyEngine.STRATEGY_EVENT.PLAN_CONSTRAINED, {
+      source,
+      violations: filtered.pruned.map((item) => ({
+        code: "duplicate_source_task",
+        severity: "low",
+        message: "Skipped duplicate read task because the same source is already present in the execution graph.",
+        taskId: item.task.id,
+        taskTitle: item.task.title
+      })),
+      inserted_approval_tasks: [],
+      blocked_tasks: []
+    });
+  };
   return function appendTasks(tasks, sourceOptions = "planner") {
     const appendOptions =
       sourceOptions && typeof sourceOptions === "object"
@@ -327,8 +454,10 @@ function createTaskAppender({
     const source = String(appendOptions.source || "planner");
     const currentTasks = taskRuntime.listTasks(goalId);
     const existingTasks = currentTasks.length ? currentTasks : allTasks;
+    const splitReadTasks = splitMultiUrlReadTasks(tasks || []);
+    emitSplitReadTasks(splitReadTasks.split, source);
     const prepared = [];
-    for (const rawTask of tasks || []) {
+    for (const rawTask of splitReadTasks.tasks || []) {
       const task = {
         ...normalizeAppenderTask(rawTask),
         id: makeTaskId(rawTask.id || rawTask.title, knownTaskIds)
@@ -337,7 +466,9 @@ function createTaskAppender({
     }
     const executable = filterNonExecutableSynthesisTasks(prepared, { goalText: goalMemoryQuery });
     emitPrunedSynthesisTasks(executable, source);
-    const initiallyDeduped = filterRedundantVerifiedTasks(executable.tasks, existingTasks);
+    const sourceDeduped = filterDuplicateSourceTasks(executable.tasks, existingTasks);
+    emitDuplicateSourceTasks(sourceDeduped, source);
+    const initiallyDeduped = filterRedundantVerifiedTasks(sourceDeduped.tasks, existingTasks);
     emitDedupedTasks(initiallyDeduped, source);
     const goalStrategy = typeof getGoalStrategy === "function" ? getGoalStrategy() : null;
     const graphExpanded = goalStrategy
@@ -423,6 +554,7 @@ function createTaskAppender({
 
 module.exports = {
   createTaskAppender,
+  filterDuplicateSourceTasks,
   filterNonExecutableSynthesisTasks,
   filterRedundantVerifiedTasks,
   hasFileWriteProhibition,
@@ -433,5 +565,6 @@ module.exports = {
   normalizeAppenderTask,
   pruneOrphanApprovalTasks,
   pruneDanglingDependencyTasks,
+  splitMultiUrlReadTasks,
   taskEvidenceCategories
 };

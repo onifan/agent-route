@@ -3,6 +3,7 @@
 const { jsonParseDiagnostics, safeJsonParse } = require("./content-utils");
 
 const PROTOCOL_VERSION = 1;
+const STRUCTURED_OUTPUT_SCHEMA_NAME = "AgentRoute Structured Output Schema v1";
 
 const KIND = {
   PLAN: "plan",
@@ -313,11 +314,12 @@ function baseContract(kind) {
     "只返回一个 JSON 对象；第一个字符必须是 {，最后一个字符必须是 }。",
     "不得输出 Markdown、代码围栏、解释文字、多个 JSON、候选方案、草稿或重复对象。",
     "如果需要表达多个任务、动作、文件、证据或下一步，必须放进同一个顶层对象的数组字段里；严禁为每个条目输出一个新的顶层 JSON 对象。",
+    "如果底层服务请求多个候选、样本或 continuation，只选择第一个候选并输出一次；完成最后一个 } 后立即停止，不得再输出第二个 { 或任何非空白字符。",
     "不得使用 fallback、mock、预置答案、模板兜底或任务专用硬编码伪造成成功。",
     "[内部逐步推理]",
     `${instruction.reasoning} 不要输出完整 chain-of-thought/思维链；只把简短、可审计的依据写入 schema 中的 reasons、riskReasons、progress_summary、evidence、uncertainties 或 nextStep 等字段。`,
     "[结构化输出]",
-    "AgentRoute Unified JSON Protocol v1.",
+    `${STRUCTURED_OUTPUT_SCHEMA_NAME}.`,
     `顶层字段 kind 必须精确等于 "${expected}"，schemaVersion 必须等于 ${PROTOCOL_VERSION}。`,
     "所有必填字段都必须出现；没有内容时用空字符串、空数组或 false，不要省略字段。",
     "字段名必须使用 schema 中的 camelCase/snake_case 原名；不要改名、翻译字段名或增加外层 payload。",
@@ -339,18 +341,18 @@ function jsonModeRequestBody(body = {}, endpointMode = "chat") {
 
 function validateKind(value, expectedKind) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
-    return { ok: false, error: "Protocol response must be a JSON object." };
+    return { ok: false, error: "Structured output must be a JSON object." };
   }
   if (value.kind !== expectedKind) {
     return {
       ok: false,
-      error: `Protocol kind must be ${expectedKind}.`
+      error: `Structured output kind must be ${expectedKind}.`
     };
   }
   if (Number(value.schemaVersion) !== PROTOCOL_VERSION) {
     return {
       ok: false,
-      error: `Protocol schemaVersion must be ${PROTOCOL_VERSION}.`
+      error: `Structured output schemaVersion must be ${PROTOCOL_VERSION}.`
     };
   }
   return { ok: true };
@@ -364,7 +366,7 @@ function parseProtocolContent(content, expectedKind, validatePayload) {
       ok: false,
       value: null,
       diagnostics,
-      error: "Protocol response must contain exactly one valid JSON object."
+      error: "Structured output must contain exactly one valid JSON object."
     };
   }
   const kindValidation = validateKind(parsed, expectedKind);
@@ -378,7 +380,7 @@ function parseProtocolContent(content, expectedKind, validatePayload) {
         ok: false,
         value: null,
         diagnostics,
-        error: payloadValidation.error || "Protocol payload is invalid."
+        error: payloadValidation.error || "Structured output payload is invalid."
       };
     }
   }
@@ -400,6 +402,7 @@ module.exports = {
   KIND,
   PROTOCOL_VERSION,
   ROLE_SCHEMAS,
+  STRUCTURED_OUTPUT_SCHEMA_NAME,
   baseContract,
   jsonModeRequestBody,
   parseProtocolContent,

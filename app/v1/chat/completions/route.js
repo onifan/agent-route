@@ -5,7 +5,7 @@ function disabledResponse() {
   return Response.json(
     {
       error: {
-        message: "The public OpenAI-compatible API is disabled. Use /api/agent-route/run for AgentRoute goals.",
+        message: "The public OpenAI-compatible API is disabled. Use /api/agent-route/ui-stream for AgentRoute goals.",
         type: "not_found",
         code: "external_compatible_api_disabled"
       }

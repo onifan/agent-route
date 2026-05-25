@@ -1271,6 +1271,33 @@ function responseBodyLooksLikeFailure(body = "", readOnlyWebTool = false) {
   );
 }
 
+function responseBodyLooksLikePlaceholderEvidence(body = "", task = {}) {
+  const text = collapseText(body);
+  if (!text) return false;
+  const taskContext = collapseText(
+    [
+      task.title,
+      task.description,
+      task.prompt,
+      Array.isArray(task.successCriteria) ? task.successCriteria.join(" ") : "",
+      text.slice(0, 800)
+    ].join(" ")
+  );
+  const marketDataContext =
+    /yield|bond|rate|spread|swap|price|quote|currency|exchange|central bank|inflation|cpi|收益率|国债|债券|利率|汇率|央行|通胀/i.test(
+      taskContext
+    );
+  if (!marketDataContext) return false;
+  return (
+    /(?:yield|rate|spread|swap|price|quote|default swap|central bank rate|gov\.?bond)[^:]{0,120}:\s*(?:-\.---|--+\.--|--+|-{2,})\s*(?:%|bp)?/i.test(
+      text
+    ) ||
+    /currently offers a yield of\s*-\.---\s*%/i.test(text) ||
+    /last update:\s*--\s*---\s*----/i.test(text) ||
+    /\b(?:s&p rating|central bank rate|credit default swap)\s*:\s*----/i.test(text)
+  );
+}
+
 function evaluateApiVerification(state, task = {}, workerResult = {}, context = {}) {
   const responses = [
     ...(workerResult.evidence && Array.isArray(workerResult.evidence.apiResponses)
@@ -1300,7 +1327,10 @@ function evaluateApiVerification(state, task = {}, workerResult = {}, context = 
       Number.isFinite(status) &&
       status >= 200 &&
       status < 300 &&
-      !(readOnlyWebTool && responseBodyLooksLikeFailure(body, true))
+      !(
+        readOnlyWebTool &&
+        (responseBodyLooksLikeFailure(body, true) || responseBodyLooksLikePlaceholderEvidence(body, task))
+      )
     );
   });
   for (const response of responses) {
@@ -1325,6 +1355,15 @@ function evaluateApiVerification(state, task = {}, workerResult = {}, context = 
     }
     if (responseBodyLooksLikeFailure(body, readOnlyWebTool))
       addIssue(state, "API response body contains failure text.", "high", true, 0.2);
+    if (readOnlyWebTool && responseBodyLooksLikePlaceholderEvidence(body, task)) {
+      addIssue(
+        state,
+        "API/web response body contains placeholder market data instead of usable values.",
+        "high",
+        true,
+        0.24
+      );
+    }
     if (response.writeConfirmed || response.persisted || response.createdId || response.updatedId)
       addReason(state, "API write was confirmed by response metadata.", 0.18);
   }
@@ -1351,7 +1390,8 @@ function evaluateSemanticVerification(state, task = {}, workerResult = {}) {
         Number.isFinite(status) &&
         status >= 200 &&
         status < 300 &&
-        !responseBodyLooksLikeFailure(body, true)
+        !responseBodyLooksLikeFailure(body, true) &&
+        !responseBodyLooksLikePlaceholderEvidence(body, task)
       );
     });
   if (error) addIssue(state, `Worker returned error text: ${error.slice(0, 180)}`, "high", true, 0.24);

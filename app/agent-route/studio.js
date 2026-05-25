@@ -1,10 +1,13 @@
 "use client";
 
+import { DefaultChatTransport } from "ai";
 import { useEffect, useMemo, useRef, useState } from "react";
 import * as promptDefaults from "../../src/config/prompts/default-prompt-settings";
+import AgentRouteChatPanel from "./chat/agent-chat";
 import ProviderDetailPage from "../dashboard/providers/[id]/page";
 import ProvidersDashboard from "../dashboard/providers/provider-console";
 
+const AGENT_ROUTE_UI_STREAM_API = "/api/agent-route/ui-stream";
 const STORAGE_KEY = "agent-route.dashboard.v3";
 const FALLBACK_STORAGE_KEY = "agent-route.studio.state.v1";
 const GOAL_DRAFT_KEY = "agent-route.goal-draft.v1";
@@ -15,12 +18,18 @@ const PROMPT_SETTINGS_KEY = "agent-route.prompt-settings.v1";
 const BUDGET_SETTINGS_KEY = "agent-route.budget-settings.v1";
 const THEME_KEY = "agent-route.theme";
 
+function normalizeCommanderModelId(value) {
+  const model = String(value || "").trim();
+  if (/^(?:cx|codex)\/gpt-?5\.5$/i.test(model) || /^gpt-?5\.5$/i.test(model)) return "gpt5.5";
+  return model;
+}
+
 function splitModelList(value) {
   return [
     ...new Set(
       String(value || "")
         .split(/[\n,]+/)
-        .map((item) => item.trim())
+        .map(normalizeCommanderModelId)
         .filter(Boolean)
     )
   ];
@@ -28,7 +37,7 @@ function splitModelList(value) {
 
 const EXPLICIT_COMMANDER_MODELS = splitModelList(
   process.env.NEXT_PUBLIC_AGENT_ROUTE_COMMANDER_MODELS || process.env.NEXT_PUBLIC_AGENT_ROUTE_COMMANDER_MODEL || ""
-);
+).filter((model) => model.toLowerCase() === "gpt5.5");
 
 const COMMANDERS = EXPLICIT_COMMANDER_MODELS.length
   ? EXPLICIT_COMMANDER_MODELS.map((id) => ({
@@ -37,13 +46,7 @@ const COMMANDERS = EXPLICIT_COMMANDER_MODELS.length
       tier: "L3",
       note: "指定总指挥 API"
     }))
-  : [
-      { id: "cx/gpt-5.2-codex", name: "GPT-5.2 Codex", tier: "L3", note: "Codex OAuth 总指挥" },
-      { id: "cx/gpt-5.2", name: "GPT-5.2", tier: "L3", note: "Codex OAuth 强推理" },
-      { id: "cx/gpt-5.1-codex-max", name: "GPT-5.1 Codex Max", tier: "L3", note: "Codex OAuth 高能力" },
-      { id: "cx/gpt-5.1-codex", name: "GPT-5.1 Codex", tier: "L3", note: "Codex OAuth 代码与规划" },
-      { id: "cx/gpt-5.1", name: "GPT-5.1", tier: "L3", note: "Codex OAuth 备选" }
-    ];
+  : [{ id: "gpt5.5", name: "gpt5.5", tier: "L3", note: "本地 API 总指挥" }];
 
 const MODEL_TIERS = [
   {
@@ -152,6 +155,7 @@ const DEFAULT_PROMPT_SETTINGS =
 
 const NAV_ITEMS = [
   ["control", "控制中心", "home", "创建和推进目标"],
+  ["chat", "聊天", "forum", "消息流和内部过程"],
   ["monitor", "监控中心", "monitoring", "运行状态和事件流"],
   ["tasks", "任务视图", "list_alt", "任务队列、依赖图和人工处理"],
   ["models", "模型管理", "robot_2", "模型等级和预算"],
@@ -229,6 +233,12 @@ function normalizeSectionTarget(section) {
   return { section: raw || "control", taskTab: "" };
 }
 
+function initialActiveSection() {
+  if (typeof window === "undefined") return "control";
+  const target = normalizeSectionTarget(window.location.hash);
+  return NAV_ITEMS.some(([id]) => id === target.section) ? target.section : "control";
+}
+
 function isRouteInternalTask(task) {
   const source = typeof task === "string" ? { id: task } : task || {};
   const id = String(source.id || source.taskId || source.task_id || "").trim();
@@ -246,8 +256,12 @@ function isDisplayTask(task) {
   return Boolean(task && (task.id || task.title));
 }
 
+function isUserVisibleTask(task) {
+  return isDisplayTask(task) && !isRouteInternalTask(task);
+}
+
 function isGraphVisibleTask(task) {
-  return isDisplayTask(task) && String(task?.status || "").toLowerCase() !== "canceled";
+  return isUserVisibleTask(task) && String(task?.status || "").toLowerCase() !== "canceled";
 }
 
 const STATUS_LABEL = {
@@ -593,7 +607,7 @@ function uniqueModelIds(values) {
   const seen = new Set();
   const output = [];
   for (const value of values || []) {
-    const model = String(value || "").trim();
+    const model = normalizeCommanderModelId(value);
     if (!model || seen.has(model)) continue;
     seen.add(model);
     output.push(model);
@@ -617,18 +631,23 @@ function cloneDefaultPools() {
 }
 
 function isCommanderGradeModel(model) {
-  const id = String(model || "").toLowerCase();
+  const id = normalizeCommanderModelId(model).toLowerCase();
+  return id === "gpt5.5" || /^(cx|codex)\/gpt-[a-z0-9_.-]+$/.test(id);
+}
+
+function isSupportedCommanderModel(model) {
+  const id = normalizeCommanderModelId(model).toLowerCase();
   if (EXPLICIT_COMMANDER_MODELS.length) {
-    return EXPLICIT_COMMANDER_MODELS.map((item) => item.toLowerCase()).includes(id);
+    return EXPLICIT_COMMANDER_MODELS.map((item) => normalizeCommanderModelId(item).toLowerCase()).includes(id);
   }
-  return /^(cx|codex)\/gpt-[a-z0-9_.-]+$/.test(id);
+  return id === "gpt5.5";
 }
 
 function cleanPoolsForTier(pools) {
   const next = { ...pools };
   next.commander = EXPLICIT_COMMANDER_MODELS.length
     ? EXPLICIT_COMMANDER_MODELS.slice()
-    : uniqueModelIds(next.commander).filter(isCommanderGradeModel);
+    : uniqueModelIds(next.commander).filter(isSupportedCommanderModel);
   if (!next.commander.length) next.commander = DEFAULT_MODEL_POOLS.commander.slice();
   next.coding = uniqueModelIds(next.coding).filter((model) => !isCommanderGradeModel(model));
   if (!next.coding.length) next.coding = DEFAULT_MODEL_POOLS.coding.slice();
@@ -661,12 +680,15 @@ function normalizeModelSettings(raw) {
       free: uniqueModelIds([...pools.free, ...defaults.free])
     };
   }
-  const requestedCommanderRaw = String(source.defaultCommander || source.commander || "").trim();
-  const requestedCommander = isCommanderGradeModel(requestedCommanderRaw) ? requestedCommanderRaw : "";
-  const defaultCommander = requestedCommander || pools.commander[0] || defaults.commander[0];
-  if (defaultCommander && !pools.commander.includes(defaultCommander)) pools.commander.unshift(defaultCommander);
+  const requestedCommanderRaw = normalizeCommanderModelId(source.defaultCommander || source.commander);
+  const requestedCommander = isSupportedCommanderModel(requestedCommanderRaw) ? requestedCommanderRaw : "";
+  if (requestedCommander && !pools.commander.includes(requestedCommander)) pools.commander.unshift(requestedCommander);
   pools = cleanPoolsForTier(pools);
   pools = dedupePoolsByTier(pools);
+  const defaultCommander =
+    requestedCommander && pools.commander.includes(requestedCommander)
+      ? requestedCommander
+      : pools.commander[0] || defaults.commander[0];
   return { version: MODEL_SETTINGS_VERSION, defaultCommander, pools };
 }
 
@@ -674,7 +696,7 @@ function loadModelSettings() {
   if (typeof window === "undefined") return normalizeModelSettings({});
   try {
     const parsed = JSON.parse(window.localStorage.getItem(MODEL_SETTINGS_KEY) || "null") || {};
-    const savedCommander = String(window.localStorage.getItem(COMMANDER_KEY) || "").trim();
+    const savedCommander = normalizeCommanderModelId(window.localStorage.getItem(COMMANDER_KEY));
     return normalizeModelSettings({
       ...parsed,
       defaultCommander: parsed.defaultCommander || parsed.commander || savedCommander
@@ -933,7 +955,7 @@ function normalizeStoredState(raw) {
     memories: [],
     observability: null,
     recovery: null,
-    filter: "running",
+    filter: "all",
     calls: 0,
     spend: 0
   };
@@ -1020,11 +1042,11 @@ function isRunnableTaskStatus(status) {
 
 function taskDerivedGoalStatus(goal, tasks = []) {
   const current = String(goal?.status || "").toLowerCase();
-  const visibleTasks = array(tasks).filter(isDisplayTask);
+  const visibleTasks = array(tasks).filter(isUserVisibleTask);
   if (!visibleTasks.length) {
-    return ["blocked", "waiting_human", "awaiting_confirmation", "running", "failed"].includes(current)
-      ? "stopped"
-      : current || "queued";
+    if (["failed", "error"].includes(current)) return "failed";
+    if (["blocked", "waiting_human", "awaiting_confirmation", "running"].includes(current)) return current;
+    return current || "queued";
   }
   if (visibleTasks.some((task) => task.status === "running")) return "running";
   if (visibleTasks.some((task) => canApproveTask(task))) return "waiting_human";
@@ -1044,9 +1066,11 @@ function taskDerivedGoalStatus(goal, tasks = []) {
 
 function shouldShowGoalInControl(goal, tasks = [], derivedStatus = "", streamRunning = false) {
   if (!goal) return false;
-  if (array(tasks).filter(isDisplayTask).length) return true;
+  if (array(tasks).filter(isUserVisibleTask).length) return true;
   if (streamRunning) return true;
-  return ["queued", "pending", "waiting", "completed", "done"].includes(String(derivedStatus || "").toLowerCase());
+  return ["queued", "pending", "waiting", "completed", "done", "failed", "blocked"].includes(
+    String(derivedStatus || "").toLowerCase()
+  );
 }
 
 function riskLabel(level) {
@@ -1324,8 +1348,8 @@ function commonFailureTextLabel(value) {
     .replace(/^Model returned invalid content\.?$/i, "模型返回内容格式无效。")
     .replace(/^Planner response did not contain a valid task graph\.?/i, "规划器没有返回有效任务图。")
     .replace(
-      /^Planner response did not contain a valid AgentRoute plan protocol object\.?/i,
-      "规划器没有返回有效的 AgentRoute 计划协议对象。"
+      /^Planner response did not contain a valid structured plan object\.?/i,
+      "规划器没有返回有效的结构化计划对象。"
     )
     .replace(/^Commander returned an invalid or empty plan\.?$/i, "总指挥返回的计划为空或格式无效。")
     .replace(/^Commander could not create a plan:\s*/i, "总指挥无法创建执行计划：")
@@ -1337,7 +1361,7 @@ function commonFailureTextLabel(value) {
     .replace(/parseError=multiple_different_json_documents/gi, "解析错误=模型输出了多个不同 JSON 对象")
     .replace(/parseError=multiple_repeated_json_documents/gi, "解析错误=模型重复输出了多个 JSON 对象")
     .replace(/topLevelJsonDocuments=(\d+)/gi, "顶层 JSON 对象数=$1")
-    .replace(/hasValidTaskGraph=false/gi, "任务图协议未通过")
+    .replace(/hasValidTaskGraph=false/gi, "任务图 schema 未通过")
     .replace(/taskCount=(\d+)/gi, "任务数=$1")
     .replace(/purchase more credits|upgrade to a paid account|upgrade to pro/i, "需要补充额度或切换可用账号")
     .replace(/can only afford\s+\d+/i, "当前可用额度不足")
@@ -1933,15 +1957,72 @@ function readyIdList(graph) {
     .filter(Boolean);
 }
 
-function parseSseBlock(block) {
-  let type = "message";
-  const data = [];
-  for (const raw of block.split(/\r?\n/)) {
-    if (!raw || raw.startsWith(":")) continue;
-    if (raw.startsWith("event:")) type = raw.slice(6).trim();
-    if (raw.startsWith("data:")) data.push(raw.slice(5).trim());
+const AI_SDK_AGENT_EVENT_BY_PART = {
+  "data-agent-run": "start",
+  "data-agent-plan": "plan",
+  "data-agent-graph": "graph",
+  "data-agent-strategy": "strategy",
+  "data-agent-budget": "budget",
+  "data-agent-risk": "risk",
+  "data-agent-verification": "verification",
+  "data-agent-task": "worker_log",
+  "data-agent-pause": "pause",
+  "data-agent-final": "final",
+  "data-agent-error": "error",
+  "data-agent-done": "done",
+  "data-agent-memory": "memory",
+  "data-agent-action": "actionRanked",
+  "data-agent-event": "message"
+};
+
+const agentRouteUiTransport = new DefaultChatTransport({
+  api: AGENT_ROUTE_UI_STREAM_API,
+  prepareSendMessagesRequest({ body }) {
+    return { body: body || {} };
   }
-  return { type, data: data.join("\n") };
+});
+
+function agentEventFromUiMessageChunk(chunk) {
+  if (!chunk || typeof chunk !== "object") return null;
+  if (chunk.type === "error") {
+    return { type: "error", data: { message: chunk.errorText || "AgentRoute stream error" } };
+  }
+  if (!String(chunk.type || "").startsWith("data-agent-")) return null;
+  const data = chunk.data && typeof chunk.data === "object" ? chunk.data : {};
+  const type = data.event || data.type || AI_SDK_AGENT_EVENT_BY_PART[chunk.type] || "";
+  if (String(type || "").toLowerCase() === "langgraph") return null;
+  if (!type || chunk.type === "data-agent-heartbeat") return null;
+  const payload = data.payload && typeof data.payload === "object" ? data.payload : data.payload == null ? data : data;
+  return { type, data: payload };
+}
+
+async function consumeAgentRouteUiMessageStream(payload, { signal, onEvent }) {
+  const stream = await agentRouteUiTransport.sendMessages({
+    chatId: String(payload.goal_id || payload.goalId || uid("goal")),
+    trigger: "submit-message",
+    messageId: undefined,
+    messages: [],
+    body: payload,
+    abortSignal: signal
+  });
+  const reader = stream.getReader();
+  let sawAgentError = false;
+  try {
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      const event = agentEventFromUiMessageChunk(value);
+      if (!event) continue;
+      if (event.type === "error") {
+        if (sawAgentError) continue;
+        sawAgentError = true;
+      }
+      if (value?.type === "data-agent-error") sawAgentError = true;
+      onEvent(event.type, event.data);
+    }
+  } finally {
+    reader.releaseLock();
+  }
 }
 
 function localGraph(goal) {
@@ -2483,7 +2564,7 @@ function localDiagnostics(goal, graph) {
 }
 
 function buildClientMonitor(goal, graph, observability) {
-  const tasks = array(goal?.tasks).filter(isDisplayTask);
+  const tasks = array(goal?.tasks).filter(isUserVisibleTask);
   const derivedStatus = goal ? taskDerivedGoalStatus(goal, tasks) : "";
   const hasVisibleGoal = shouldShowGoalInControl(goal, tasks, derivedStatus, false);
   if (!goal || !hasVisibleGoal) {
@@ -2620,7 +2701,7 @@ function initialState() {
     activeGoalId: "",
     logs: [],
     memories: [],
-    filter: "running",
+    filter: "all",
     calls: 0,
     spend: 0
   });
@@ -2688,13 +2769,18 @@ export default function AgentRouteStudio() {
     document.documentElement.dataset.agentRouteHydrated = "true";
     const draft = loadGoalDraft();
     const liveGoalText = document.getElementById("goalText")?.value || "";
+    const loadedModelSettings = loadModelSettings();
     setState(loadStoredState());
-    setModelSettings(loadModelSettings());
+    setModelSettings(loadedModelSettings);
+    saveModelSettings(loadedModelSettings);
     setPromptSettings(loadPromptSettings());
     setBudgetSettings(loadBudgetSettings());
     setTheme(initialTheme());
     setGoalText((current) => current || liveGoalText || draft.goalText);
     setPriority((current) => current || draft.priority);
+    setActiveSection(initialActiveSection());
+    const initialTarget = normalizeSectionTarget(window.location.hash);
+    if (initialTarget.taskTab) setTaskPanelTab(initialTarget.taskTab);
     setStorageReady(true);
   }, []);
 
@@ -2765,7 +2851,7 @@ export default function AgentRouteStudio() {
   }, []);
 
   const visibleTasks = useMemo(() => {
-    let tasks = array(activeGoal?.tasks).filter(isDisplayTask);
+    let tasks = array(activeGoal?.tasks).filter(isUserVisibleTask);
     if (state.filter !== "all") {
       tasks = tasks.filter((task) => {
         if (state.filter === "queued") return isWaiting(task.status);
@@ -2789,7 +2875,7 @@ export default function AgentRouteStudio() {
   }, [selectedQueueTaskId, visibleTasks]);
 
   const summary = useMemo(() => {
-    const tasks = array(activeGoal?.tasks).filter(isDisplayTask);
+    const tasks = array(activeGoal?.tasks).filter(isUserVisibleTask);
     const total = tasks.length;
     const done = tasks.filter((task) => isDone(task.status)).length;
     const failed = tasks.filter((task) => isFailed(task.status)).length;
@@ -2905,6 +2991,7 @@ export default function AgentRouteStudio() {
   }
 
   function handleStreamEvent(goalId, type, data) {
+    if (String(type || "").toLowerCase() === "langgraph") return;
     const monitorEvent = makeMonitorEvent(goalId, type, data);
     setState((current) => {
       let nextCalls = current.calls;
@@ -3092,58 +3179,20 @@ export default function AgentRouteStudio() {
     }));
     addLog(`开始执行目标：${goal.title}`, "success");
     try {
-      const response = await fetch("/api/agent-route/run", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          goal: goal.goal,
-          goal_id: goal.id,
-          resume_goal: resume,
-          commander_model: goal.commander || modelSettings.defaultCommander,
-          priority: goal.priority,
-          model_pools: modelSettings.pools,
-          prompt_settings: promptSettings,
-          budget: budgetSettings
-        }),
-        signal: controller.signal
+      const requestBody = {
+        goal: goal.goal,
+        goal_id: goal.id,
+        resume_goal: resume,
+        commander_model: goal.commander || modelSettings.defaultCommander,
+        priority: goal.priority,
+        model_pools: modelSettings.pools,
+        prompt_settings: promptSettings,
+        budget: budgetSettings
+      };
+      await consumeAgentRouteUiMessageStream(requestBody, {
+        signal: controller.signal,
+        onEvent: (type, data) => handleStreamEvent(goal.id, type, data)
       });
-      if (!response.ok) {
-        const error = await response.json().catch(() => ({}));
-        throw new Error(error.error?.message || error.message || `请求失败（${response.status}）`);
-      }
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = "";
-      for (;;) {
-        const { value, done } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        const blocks = buffer.split(/\n\n/);
-        buffer = blocks.pop() || "";
-        for (const block of blocks) {
-          const parsed = parseSseBlock(block);
-          if (!parsed.data) continue;
-          let data = {};
-          try {
-            data = JSON.parse(parsed.data);
-          } catch {
-            data = { text: parsed.data };
-          }
-          handleStreamEvent(goal.id, parsed.type, data);
-        }
-      }
-      if (buffer.trim()) {
-        const parsed = parseSseBlock(buffer);
-        if (parsed.data) {
-          let data = {};
-          try {
-            data = JSON.parse(parsed.data);
-          } catch {
-            data = { text: parsed.data };
-          }
-          handleStreamEvent(goal.id, parsed.type, data);
-        }
-      }
     } catch (err) {
       if (err?.name === "AbortError") {
         patchGoal(goal.id, (item) => ({ ...item, status: "stopped" }));
@@ -3178,11 +3227,49 @@ export default function AgentRouteStudio() {
       graph: null,
       output: ""
     };
-    setState((current) => ({ ...current, goals: [goal, ...current.goals].slice(0, 40), activeGoalId: goal.id }));
+    setState((current) => ({
+      ...current,
+      goals: [goal, ...current.goals].slice(0, 40),
+      activeGoalId: goal.id,
+      filter: "all"
+    }));
     setGoalText("");
     save(GOAL_DRAFT_KEY, { goalText: "", priority, updatedAt: new Date().toISOString() });
     addLog(`目标已创建：${goal.title}`, "success");
     if (runNow) setTimeout(() => runGoal(goal), 0);
+  }
+
+  function registerChatGoal({ id, text, commanderModel }) {
+    const goalTextValue = String(text || "").trim();
+    if (!id || !goalTextValue) return;
+    const timestamp = nowTime();
+    const goal = {
+      id,
+      title: shortText(goalTextValue, 76) || "聊天目标",
+      goal: goalTextValue,
+      commander: commanderModel || selectedCommander,
+      priority: "normal",
+      status: "running",
+      createdAt: timestamp,
+      updatedAt: timestamp,
+      flow: { commander: "active" },
+      tasks: [],
+      strategy: null,
+      strategyHistory: [],
+      graph: null,
+      output: ""
+    };
+    setSelectedGraphTaskId("");
+    setSelectedQueueTaskId("");
+    setTaskPanelTab("queue");
+    setState((current) => {
+      const exists = current.goals.some((item) => item.id === id);
+      const goals = exists
+        ? current.goals.map((item) => (item.id === id ? { ...item, ...goal, tasks: item.tasks || [] } : item))
+        : [goal, ...current.goals].slice(0, 40);
+      return { ...current, goals, activeGoalId: id, filter: "all" };
+    });
+    addLog(`聊天目标已启动：${goal.title}`, "success");
   }
 
   async function taskAction(task, action) {
@@ -3517,7 +3604,7 @@ export default function AgentRouteStudio() {
     storageReady ? modelSettings.pools.commander : DEFAULT_MODEL_POOLS.commander,
     DEFAULT_MODEL_POOLS.commander
   );
-  const activeTasks = array(activeGoal?.tasks).filter(isDisplayTask);
+  const activeTasks = array(activeGoal?.tasks).filter(isUserVisibleTask);
   const controlStatus = activeGoal ? taskDerivedGoalStatus(activeGoal, activeTasks) : "";
   const activeGoalStatus = String(activeGoal?.status || "").toLowerCase();
   const activeGoalFailed =
@@ -3563,6 +3650,36 @@ export default function AgentRouteStudio() {
         level: line.level || "info",
         message: line.message
       }));
+
+  function renderTaskWorkspacePanel() {
+    return (
+      <TaskWorkspacePanel
+        goal={activeGoal}
+        graph={graph}
+        tasks={activeTasks}
+        stats={{ nodes: graphNodes.length, ready: readyIds.length, blocked: blockedChains.length, artifacts }}
+        visibleTasks={visibleTasks}
+        filter={state.filter}
+        activeTab={taskPanelTab}
+        graphViewMode={graphViewMode}
+        selectedGraphTaskId={selectedGraphTaskId}
+        selectedQueueTaskId={selectedQueueTaskId}
+        onTabChange={setTaskPanelTab}
+        onGraphViewModeChange={setGraphViewMode}
+        onFilterChange={(filter) => setState((current) => ({ ...current, filter }))}
+        onSelectGraphTask={(taskId) => {
+          setSelectedGraphTaskId(taskId);
+          setSelectedQueueTaskId(taskId);
+        }}
+        onSelectQueueTask={(taskId) => {
+          setSelectedQueueTaskId(taskId);
+          setSelectedGraphTaskId(taskId);
+        }}
+        onRefreshGraph={() => refreshGraph().catch((err) => addLog(err.message, "error"))}
+        onTaskAction={(task, action) => taskAction(task, action).catch((err) => addLog(err.message, "error"))}
+      />
+    );
+  }
 
   return (
     <div className="studio-app app">
@@ -3681,6 +3798,7 @@ export default function AgentRouteStudio() {
             <button
               className="btn theme-toggle-btn"
               type="button"
+              data-theme-toggle
               data-react-theme-toggle
               onClick={() => setTheme((current) => (current === "light" ? "dark" : "light"))}
               aria-pressed={theme === "light"}
@@ -3878,6 +3996,22 @@ export default function AgentRouteStudio() {
               </section>
             </div>
 
+            <div className="app-section agent-chat-section" data-agent-section="chat" hidden={activeSection !== "chat"}>
+              <div className="agent-chat-console-grid">
+                <AgentRouteChatPanel
+                  commanderModel={selectedCommander}
+                  modelPools={modelSettings.pools}
+                  promptSettings={promptSettings}
+                  budgetSettings={budgetSettings}
+                  onRoundStart={registerChatGoal}
+                  onAgentEvent={(goalId, type, data) => handleStreamEvent(goalId, type, data)}
+                />
+                <aside className="agent-chat-task-pane">
+                  {activeSection === "chat" ? renderTaskWorkspacePanel() : null}
+                </aside>
+              </div>
+            </div>
+
             <div className="app-section" data-agent-section="monitor" hidden={activeSection !== "monitor"}>
               <MonitorPanel
                 monitor={monitor}
@@ -3892,31 +4026,7 @@ export default function AgentRouteStudio() {
             </div>
 
             <div className="app-section" data-agent-section="tasks" hidden={activeSection !== "tasks"}>
-              <TaskWorkspacePanel
-                goal={activeGoal}
-                graph={graph}
-                tasks={activeTasks}
-                stats={{ nodes: graphNodes.length, ready: readyIds.length, blocked: blockedChains.length, artifacts }}
-                visibleTasks={visibleTasks}
-                filter={state.filter}
-                activeTab={taskPanelTab}
-                graphViewMode={graphViewMode}
-                selectedGraphTaskId={selectedGraphTaskId}
-                selectedQueueTaskId={selectedQueueTaskId}
-                onTabChange={setTaskPanelTab}
-                onGraphViewModeChange={setGraphViewMode}
-                onFilterChange={(filter) => setState((current) => ({ ...current, filter }))}
-                onSelectGraphTask={(taskId) => {
-                  setSelectedGraphTaskId(taskId);
-                  setSelectedQueueTaskId(taskId);
-                }}
-                onSelectQueueTask={(taskId) => {
-                  setSelectedQueueTaskId(taskId);
-                  setSelectedGraphTaskId(taskId);
-                }}
-                onRefreshGraph={() => refreshGraph().catch((err) => addLog(err.message, "error"))}
-                onTaskAction={(task, action) => taskAction(task, action).catch((err) => addLog(err.message, "error"))}
-              />
+              {activeSection === "tasks" ? renderTaskWorkspacePanel() : null}
             </div>
 
             <div className="app-section" data-agent-section="providers" hidden={activeSection !== "providers"}>
@@ -4869,9 +4979,17 @@ function SettingsDrawer({
       coding: readModelLines(pools.coding, DEFAULT_MODEL_POOLS.coding),
       free: readModelLines(pools.free, DEFAULT_MODEL_POOLS.free)
     };
-    const nextCommander = String(defaultCommander || nextPools.commander[0] || DEFAULT_MODEL_POOLS.commander[0]).trim();
-    if (nextCommander && !nextPools.commander.includes(nextCommander)) nextPools.commander.unshift(nextCommander);
+    const requestedCommander = normalizeCommanderModelId(
+      defaultCommander || nextPools.commander[0] || DEFAULT_MODEL_POOLS.commander[0]
+    );
+    if (requestedCommander && !nextPools.commander.includes(requestedCommander)) {
+      nextPools.commander.unshift(requestedCommander);
+    }
     nextPools = dedupePoolsByTier(cleanPoolsForTier(nextPools));
+    const nextCommander =
+      isSupportedCommanderModel(requestedCommander) && nextPools.commander.includes(requestedCommander)
+        ? requestedCommander
+        : nextPools.commander[0] || DEFAULT_MODEL_POOLS.commander[0];
     return { defaultCommander: nextCommander, pools: nextPools };
   }
 
@@ -5026,7 +5144,7 @@ function SettingsDrawer({
                 list="commanderOptions"
                 value={defaultCommander}
                 onChange={(event) => setDefaultCommander(event.target.value)}
-                placeholder="cx/gpt-5.2-codex"
+                placeholder="gpt5.5"
                 autoComplete="off"
               />
               <datalist id="commanderOptions">
@@ -5773,7 +5891,8 @@ function queueStatusKey(task = {}) {
   if (isDone(status)) return "completed";
   if (status === "running") return "running";
   if (status === "blocked" || dependencyStatus === "blocked") return "blocked";
-  if (["failed", "error", "canceled", "cancelled"].includes(status)) return "failed";
+  if (["canceled", "cancelled"].includes(status)) return "canceled";
+  if (["failed", "error"].includes(status)) return "failed";
   if (dependencyStatus === "ready") return "ready";
   return "pending";
 }
@@ -6463,6 +6582,7 @@ function graphStatusKey(task = {}, node = {}, readyIds = new Set()) {
   if (isDone(status)) return "completed";
   if (status === "running") return "running";
   if (status === "blocked") return "blocked";
+  if (["canceled", "cancelled"].includes(status)) return "canceled";
   if (isFailed(status)) return "failed";
   if (dependencyStatus === "blocked") return "blocked";
   if (readyIds.has(String(node.id || task.id || "")) || node.readiness?.ready) return "ready";
@@ -6474,6 +6594,7 @@ function graphStatusIcon(status) {
   if (status === "running") return "progress_activity";
   if (status === "blocked") return "pause_circle";
   if (status === "failed") return "cancel";
+  if (status === "canceled") return "block";
   if (status === "waiting_human") return "person_alert";
   if (status === "ready") return "play_circle";
   return "schedule";
@@ -6483,6 +6604,7 @@ function graphStatusLabel(status) {
   if (status === "ready") return "可执行";
   if (status === "pending") return "待处理";
   if (status === "waiting_human") return "等待人工";
+  if (status === "canceled") return "已取消";
   return displayStatus(status, valueLabel(status) || "待处理");
 }
 
@@ -6491,6 +6613,7 @@ function graphStatusTone(status) {
   if (status === "running" || status === "ready") return "run";
   if (status === "blocked") return "blocked";
   if (status === "failed") return "fail";
+  if (status === "canceled") return "fail";
   if (status === "waiting_human") return "human";
   return "pending";
 }

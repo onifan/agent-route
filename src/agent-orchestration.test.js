@@ -388,8 +388,8 @@ function testNewsSearchUsesPlannerInputClauses() {
 
 async function testWebEvidenceReviewAndFinalStayOnCommanderModels() {
   const commanderRoute = {
-    selected: "cx/gpt-5.5",
-    models: ["cx/gpt-5.5", "openrouter/anthropic/claude-sonnet-4.5"]
+    selected: "gpt5.5",
+    models: ["gpt5.5"]
   };
   const config = {
     ...DEFAULT_CONFIG,
@@ -469,7 +469,7 @@ async function testWebEvidenceReviewAndFinalStayOnCommanderModels() {
 
   assert.deepEqual(
     bodies.map((body) => body.model),
-    ["cx/gpt-5.5"]
+    ["gpt5.5"]
   );
   assert.ok(!bodies.some((body) => /glm|gemini|deepseek/i.test(body.model)));
   const start = events.find((item) => item.event === "worker_start");
@@ -479,8 +479,8 @@ async function testWebEvidenceReviewAndFinalStayOnCommanderModels() {
 
 async function testWebEvidenceProgressReviewStaysOnCommanderModels() {
   const commanderRoute = {
-    selected: "cx/gpt-5.5",
-    models: ["cx/gpt-5.5", "openrouter/anthropic/claude-sonnet-4.5"]
+    selected: "gpt5.5",
+    models: ["gpt5.5"]
   };
   const config = {
     ...DEFAULT_CONFIG,
@@ -671,6 +671,14 @@ function testReviewPromptIncludesVerifiedEvidenceInventoryFromPlan() {
           input: "https://open.example.test/data",
           result:
             "URL: https://open.example.test/data\nHTTP: 200\nTitle: Open Dataset\nText: Verified public evidence row."
+        },
+        {
+          id: "waiting-read",
+          title: "Read second selected public source",
+          type: "web_read",
+          toolWorker: "web",
+          status: "waiting",
+          dependsOn: ["verified-read"]
         }
       ]
     },
@@ -682,6 +690,9 @@ function testReviewPromptIncludesVerifiedEvidenceInventoryFromPlan() {
     { normalizePromptSettings: (value) => value }
   );
   const promptText = reviewMessages.map((message) => message.content).join("\n");
+  assert.match(promptText, /仍可行动\/未执行真实任务清单/);
+  assert.match(promptText, /waiting-read/);
+  assert.match(promptText, /不得返回 done\/final_answer/);
   assert.match(promptText, /已验证证据清单/);
   assert.match(promptText, /verified-read/);
   assert.match(promptText, /open\.example\.test\/data/);
@@ -1072,7 +1083,7 @@ async function testModelCallProgressEventsExposeAttemptsAndFailover() {
   assert.equal(events[4].data.model, "openrouter/second-model");
 }
 
-async function testModelCallRetriesSameModelBeforeFailure() {
+async function testModelCallDoesNotRetryConnectionFailure() {
   const events = [];
   const trace = [];
   let calls = 0;
@@ -1083,36 +1094,52 @@ async function testModelCallRetriesSameModelBeforeFailure() {
     }),
     nextHandler: async () => {
       calls += 1;
-      if (calls < 3) {
-        return new Response(JSON.stringify({ choices: [{ message: { content: "not json" } }] }), {
-          status: 200,
-          headers: { "Content-Type": "application/json" }
-        });
-      }
       return new Response(
         JSON.stringify({
-          choices: [
-            {
-              message: {
-                content: JSON.stringify({
-                  kind: "plan",
-                  schemaVersion: 1,
-                  tasks: [
-                    {
-                      id: "inspect",
-                      title: "Inspect generic evidence",
-                      type: "analysis",
-                      modelPool: "strong",
-                      successCriteria: ["returns a structured task"]
-                    }
-                  ]
-                })
-              }
-            }
-          ]
+          error: {
+            message: "Internal model request failed: fetch failed"
+          }
         }),
-        { status: 200, headers: { "Content-Type": "application/json" } }
+        { status: 502, headers: { "Content-Type": "application/json" } }
       );
+    },
+    baseBody: { max_tokens: 256, temperature: 0.2 },
+    models: ["gpt5.5"],
+    messages: [{ role: "user", content: "Create a plan." }],
+    config: { ...DEFAULT_CONFIG, modelMaxAttempts: 3 },
+    label: "plan",
+    trace,
+    endpointMode: "chat",
+    onModelEvent: (event, data) => events.push({ event, data })
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(calls, 1);
+  assert.deepEqual(
+    events.map((item) => item.event),
+    ["model_attempt", "model_failure"]
+  );
+  assert.equal(
+    trace.some((item) => item.retry),
+    false
+  );
+}
+
+async function testModelCallDoesNotRetryInvalidStructuredOutput() {
+  const events = [];
+  const trace = [];
+  let calls = 0;
+  const result = await orchestratorRuntime.callWithFallback({
+    req: new Request("http://localhost/api/v1/chat/completions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" }
+    }),
+    nextHandler: async () => {
+      calls += 1;
+      return new Response(JSON.stringify({ choices: [{ message: { content: "not json" } }] }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" }
+      });
     },
     baseBody: { max_tokens: 256, temperature: 0.2 },
     models: ["GPT-5.5"],
@@ -1123,33 +1150,26 @@ async function testModelCallRetriesSameModelBeforeFailure() {
     endpointMode: "chat",
     validateContent: (content) => {
       const parsed = planner.parsePlannerContent(content);
-      return parsed ? { ok: true } : { ok: false, error: "Planner response did not contain a valid plan protocol." };
+      return parsed ? { ok: true } : { ok: false, error: "Planner response did not contain a valid plan schema." };
     },
     onModelEvent: (event, data) => events.push({ event, data })
   });
 
-  assert.equal(result.ok, true);
-  assert.equal(calls, 3);
+  assert.equal(result.ok, false);
+  assert.equal(calls, 1);
   assert.deepEqual(
     events.map((item) => item.event),
-    [
-      "model_attempt",
-      "model_failure",
-      "model_retry",
-      "model_attempt",
-      "model_failure",
-      "model_retry",
-      "model_attempt",
-      "model_success"
-    ]
+    ["model_attempt", "model_failure"]
   );
-  assert.equal(events[2].data.model, "GPT-5.5");
-  assert.equal(events[2].data.modelAttempt, 2);
-  assert.equal(events[2].data.maxModelAttempts, 3);
-  assert.ok(trace.some((item) => item.retry === "attempt_3" && item.ok === true));
+  assert.equal(events[1].data.model, "GPT-5.5");
+  assert.match(result.error, /valid plan schema/);
+  assert.equal(
+    trace.some((item) => item.retry),
+    false
+  );
 }
 
-async function testProtocolRetryExplainsMultipleJsonDocuments() {
+async function testStructuredOutputErrorExplainsMultipleJsonDocuments() {
   const requestBodies = [];
   let calls = 0;
   const first = {
@@ -1162,20 +1182,6 @@ async function testProtocolRetryExplainsMultipleJsonDocuments() {
     schemaVersion: 1,
     tasks: [{ id: "second", title: "Second", type: "analysis", modelPool: "free", successCriteria: ["second"] }]
   };
-  const valid = {
-    kind: "plan",
-    schemaVersion: 1,
-    tasks: [
-      {
-        id: "single-plan",
-        title: "Create one valid plan",
-        type: "analysis",
-        modelPool: "free",
-        successCriteria: ["One top-level JSON object is returned."]
-      }
-    ]
-  };
-
   const result = await orchestratorRuntime.callWithFallback({
     req: new Request("http://localhost/api/v1/chat/completions", {
       method: "POST",
@@ -1185,7 +1191,7 @@ async function testProtocolRetryExplainsMultipleJsonDocuments() {
       calls += 1;
       const body = await request.json();
       requestBodies.push(body);
-      const content = calls === 1 ? `${JSON.stringify(first)}${JSON.stringify(second)}` : JSON.stringify(valid);
+      const content = `${JSON.stringify(first)}${JSON.stringify(second)}`;
       return new Response(JSON.stringify({ choices: [{ message: { content } }] }), {
         status: 200,
         headers: { "Content-Type": "application/json" }
@@ -1205,19 +1211,18 @@ async function testProtocolRetryExplainsMultipleJsonDocuments() {
         ? { ok: true }
         : {
             ok: false,
-            error: "Planner response did not contain a valid AgentRoute plan protocol object.",
+            error: "Planner response did not contain a valid structured plan object.",
             diagnostics: planner.plannerContentDiagnostics(content)
           };
     }
   });
 
-  assert.equal(result.ok, true);
+  assert.equal(result.ok, false);
+  assert.equal(calls, 1);
+  assert.equal(requestBodies.length, 1);
   assert.equal(requestBodies[0].response_format.type, "json_object");
-  assert.equal(requestBodies[1].response_format.type, "json_object");
-  const retryPrompt = requestBodies[1].messages.map((message) => message.content).join("\n");
-  assert.match(retryPrompt, /multiple_different_json_documents/);
-  assert.match(retryPrompt, /topLevelJsonDocuments=2/);
-  assert.match(retryPrompt, /single top-level JSON object/);
+  assert.match(result.error, /multiple_different_json_documents/);
+  assert.match(result.error, /topLevelJsonDocuments=2/);
 }
 
 async function testToolWorkerRetriesTransientFailuresOnly() {
@@ -1387,7 +1392,7 @@ function testAnalysisWorkerReceivesUpstreamEvidence() {
 }
 
 function testCommanderPromptsSeparatePlanningFromExecution() {
-  assert.equal(DEFAULT_PROMPT_SETTINGS.version, 8);
+  assert.equal(DEFAULT_PROMPT_SETTINGS.version, 9);
   assert.match(DEFAULT_PROMPT_SETTINGS.commanderSystem, /\[角色\]/);
   assert.match(DEFAULT_PROMPT_SETTINGS.commanderSystem, /\[任务\]/);
   assert.match(DEFAULT_PROMPT_SETTINGS.commanderSystem, /\[约束\]/);
@@ -1395,7 +1400,7 @@ function testCommanderPromptsSeparatePlanningFromExecution() {
   assert.match(DEFAULT_PROMPT_SETTINGS.commanderSystem, /规划不是执行/);
   assert.match(DEFAULT_PROMPT_SETTINGS.plannerInstructions, /普通聊天模型不能假装/);
   assert.match(DEFAULT_PROMPT_SETTINGS.plannerInstructions, /source-discovery web_search/);
-  assert.match(DEFAULT_PROMPT_SETTINGS.plannerInstructions, /Unified JSON Protocol v1/);
+  assert.match(DEFAULT_PROMPT_SETTINGS.plannerInstructions, /Structured Output Schema v1/);
   assert.match(DEFAULT_PROMPT_SETTINGS.plannerInstructions, /kind 必须是 "plan"/);
   assert.match(DEFAULT_PROMPT_SETTINGS.plannerInstructions, /\[Few-shot\]/);
   assert.match(DEFAULT_PROMPT_SETTINGS.plannerInstructions, /不得重复输出/);
@@ -1719,6 +1724,106 @@ function testTaskAppenderAllowsScopedArtifactDocumentGeneration() {
   assert.equal(
     trace.some((item) => item.label === "synthesis-prune:review"),
     false
+  );
+}
+
+function testTaskAppenderSplitsMultiUrlReadTasks() {
+  reset();
+  const goalId = "split-multi-url-read-goal";
+  const trace = [];
+  const appendTasks = taskAppender.createTaskAppender({
+    goalId,
+    allTasks: [],
+    knownTaskIds: new Set(),
+    getGoalStrategy: () => null,
+    goalMemoryQuery: "",
+    plannerMemory: "",
+    trace,
+    send: () => {},
+    emitStrategy: () => {},
+    emitGraph: () => ({ readyTaskIds: [] }),
+    taskSummary: (task) => task
+  });
+
+  const registered = appendTasks(
+    [
+      {
+        id: "multi-api",
+        title: "读取多个公开 API",
+        type: "api_read",
+        toolWorker: "web",
+        input: "https://api.example.test/latest?from=USD&to=JPY,EUR\nhttps://api.example.test/latest?from=EUR&to=JPY",
+        successCriteria: ["HTTP status and response body"]
+      }
+    ],
+    "review"
+  );
+
+  assert.deepEqual(
+    registered.map((task) => task.id),
+    ["multi-api", "multi-api-2"]
+  );
+  assert.deepEqual(
+    registered.map((task) => task.input),
+    ["https://api.example.test/latest?from=USD&to=JPY,EUR", "https://api.example.test/latest?from=EUR&to=JPY"]
+  );
+  assert.ok(trace.some((item) => item.label === "split-read:review"));
+}
+
+function testTaskAppenderDropsDuplicateReadSourceTasks() {
+  reset();
+  const goalId = "dedupe-duplicate-read-source-goal";
+  const trace = [];
+  const strategyEvents = [];
+  const appendTasks = taskAppender.createTaskAppender({
+    goalId,
+    allTasks: [],
+    knownTaskIds: new Set(),
+    getGoalStrategy: () => null,
+    goalMemoryQuery: "",
+    plannerMemory: "",
+    trace,
+    send: () => {},
+    emitStrategy: (event, payload) => strategyEvents.push({ event, payload }),
+    emitGraph: () => ({ readyTaskIds: [] }),
+    taskSummary: (task) => task
+  });
+
+  const first = appendTasks(
+    [
+      {
+        id: "fx-api",
+        title: "读取汇率 API",
+        type: "api_read",
+        toolWorker: "web",
+        input: "https://open.example.test/latest/USD",
+        successCriteria: ["HTTP status and response body"]
+      }
+    ],
+    "review"
+  );
+  const second = appendTasks(
+    [
+      {
+        id: "fx-api-again",
+        title: "再次读取汇率 API",
+        type: "api_read",
+        toolWorker: "web",
+        input: "https://open.example.test/latest/USD",
+        successCriteria: ["HTTP status and response body"]
+      }
+    ],
+    "review"
+  );
+
+  assert.equal(first.length, 1);
+  assert.equal(second.length, 0);
+  assert.equal(taskRuntime.listTasks(goalId).length, 1);
+  assert.ok(trace.some((item) => item.label === "source-dedupe:review"));
+  assert.ok(
+    strategyEvents.some((item) =>
+      (item.payload.violations || []).some((violation) => violation.code === "duplicate_source_task")
+    )
   );
 }
 
@@ -2716,6 +2821,49 @@ function testReadOnlyWebReadRejectsGenericErrorShell() {
   assert.ok(verification.detectedIssues.some((issue) => /error|failure|something went wrong/i.test(issue.issue)));
 }
 
+function testReadOnlyWebReadRejectsPlaceholderMarketData() {
+  const verification = verificationEngine.verifyTaskResult(
+    {
+      id: "jgb-yield-read",
+      title: "读取日本10年期国债收益率页面",
+      type: "web_read",
+      modelPool: "free",
+      toolWorker: "web",
+      riskLevel: "low",
+      input: "https://www.worldgovernmentbonds.com/country/japan/",
+      successCriteria: ["返回可验证的日本10年期国债收益率数值、URL、HTTP status 和页面文本。"]
+    },
+    {
+      status: "success",
+      model: "web-tool",
+      output:
+        "URL: https://www.worldgovernmentbonds.com/country/japan/ HTTP: 200 Title: Japan Government Bonds - Yields Curve Text: Japan 10-Year Government Bond currently offers a yield of -.--- %. Central Bank Rate : ---- %",
+      evidence: {
+        summary: "Japan government bond page loaded with placeholder yield values.",
+        apiResponses: [
+          {
+            method: "GET",
+            url: "https://www.worldgovernmentbonds.com/country/japan/",
+            status: 200,
+            body: "Japan Government Bonds - Yields Curve Last Update: -- --- ----, --:-- GMT+0 10-Year Gov.Bond Yield : -.--- % Spread vs 2-Year Bond : ---.-- bp Central Bank Rate : ---- %"
+          }
+        ],
+        semantic: {
+          outputSummary: "Page loaded but market data fields are placeholders.",
+          addressesCriteria: true,
+          criteriaCoverage: 0.8,
+          qualityScore: 0.75
+        }
+      },
+      context: { model: "web-tool", url: "https://www.worldgovernmentbonds.com/country/japan/" }
+    },
+    { phase: "after_worker", maxAttempts: 2 }
+  );
+
+  assert.equal(verification.verificationStatus, verificationEngine.VERIFICATION_STATUS.UNVERIFIED);
+  assert.ok(verification.detectedIssues.some((issue) => /placeholder market data/i.test(issue.issue)));
+}
+
 function testMultiQueryWebSearchVerificationRejectsUnrelatedClauseEvidence() {
   const verification = verificationEngine.verifyTaskResult(
     {
@@ -2971,6 +3119,73 @@ function testPartialFinalWithFailedEvidenceDoesNotMarkGoalCompleted() {
   );
 }
 
+function testFinalIsBlockedUntilPlannedTasksReachTerminalState() {
+  const blocked = orchestratorRuntime.finalBlockedByUnresolvedPlannedTasks([
+    { id: "plan", internal: true, status: "waiting" },
+    { id: "collect-weather", type: "web_search", toolWorker: "web", status: "completed" },
+    { id: "collect-news", type: "web_search", toolWorker: "web", status: "waiting", title: "收集新闻证据" }
+  ]);
+  assert.equal(blocked.blocked, true);
+  assert.equal(blocked.status, "blocked");
+  assert.equal(blocked.tasks.map((task) => task.id).join(","), "collect-news");
+  assert.match(blocked.message, /未进入终态/);
+  assert.equal(
+    orchestratorRuntime.finalBlockedByUnresolvedPlannedTasks([
+      { id: "collect-weather", type: "web_search", toolWorker: "web", status: "completed" },
+      { id: "collect-news", type: "web_search", toolWorker: "web", status: "failed" }
+    ]).blocked,
+    false
+  );
+  assert.equal(
+    orchestratorRuntime.finalBlockedByUnresolvedPlannedTasks([
+      { id: "collect-weather", type: "web_search", toolWorker: "web", status: "completed" },
+      {
+        id: "broad-search",
+        type: "web_search",
+        toolWorker: "web",
+        status: "needs_evidence",
+        attempts: 2,
+        maxAttempts: 2,
+        result: "Returned unrelated pages.",
+        verificationStatus: "unverified"
+      }
+    ]).blocked,
+    false,
+    "exhausted evidence-gap tasks have been observed and should not block final by themselves"
+  );
+  assert.equal(
+    orchestratorRuntime.finalBlockedByUnresolvedPlannedTasks([
+      {
+        id: "retry-search",
+        type: "web_search",
+        toolWorker: "web",
+        status: "needs_evidence",
+        attempts: 1,
+        maxAttempts: 2,
+        result: "Missing required evidence.",
+        verificationStatus: "unverified"
+      }
+    ]).blocked,
+    true,
+    "needs_evidence tasks with remaining attempts are still actionable"
+  );
+  assert.equal(
+    orchestratorRuntime.finalGoalStatusFromTasks("部分完成：关键数据未取得，证据不足。", [
+      {
+        id: "broad-search",
+        type: "web_search",
+        status: "needs_evidence",
+        attempts: 2,
+        maxAttempts: 2,
+        result: "Returned unrelated pages.",
+        verificationStatus: "unverified"
+      }
+    ]).status,
+    "blocked",
+    "explicitly partial finals with exhausted evidence gaps should keep the goal blocked"
+  );
+}
+
 async function main() {
   testInternetResearchIsRoutedToAgentToolWorker();
   testFinanceResearchPlanKeepsPlannerTasksAsWebEvidence();
@@ -2997,8 +3212,9 @@ async function main() {
   await testInvalidWebPlanFailsWithoutRulePlanner();
   await testProviderCreditLimitRetriesWithLowerMaxTokens();
   await testModelCallProgressEventsExposeAttemptsAndFailover();
-  await testModelCallRetriesSameModelBeforeFailure();
-  await testProtocolRetryExplainsMultipleJsonDocuments();
+  await testModelCallDoesNotRetryConnectionFailure();
+  await testModelCallDoesNotRetryInvalidStructuredOutput();
+  await testStructuredOutputErrorExplainsMultipleJsonDocuments();
   await testToolWorkerRetriesTransientFailuresOnly();
   await testModelCallProgressEventsExposeTimeout();
   testAnalysisWorkerReceivesUpstreamEvidence();
@@ -3007,6 +3223,8 @@ async function main() {
   testTaskAppenderDropsNonExecutableReviewSynthesisTasks();
   testTaskAppenderDropsDocumentGenerationWhenGoalForbidsFileChanges();
   testTaskAppenderAllowsScopedArtifactDocumentGeneration();
+  testTaskAppenderSplitsMultiUrlReadTasks();
+  testTaskAppenderDropsDuplicateReadSourceTasks();
   testPlannerGivesToolTasksVerificationRetryWindow();
   testCommanderJsonTokenBudgetsAreConfigurable();
   testBrowserAutomationKeywordDoesNotForceLocalExecution();
@@ -3030,6 +3248,7 @@ async function main() {
   testWebSearchVerificationRejectsMismatchedWorkerQueryForAlternatives();
   testDistinctMultiQueryWebSearchRequiresEveryClause();
   testReadOnlyWebReadRejectsGenericErrorShell();
+  testReadOnlyWebReadRejectsPlaceholderMarketData();
   testMultiQueryWebSearchVerificationRejectsUnrelatedClauseEvidence();
   testReadOnlyWebSearchVerificationMatchesMixedCjkNumericEvidence();
   testInteractiveRunsDoNotTriggerUnattendedNightEscalation();
@@ -3039,6 +3258,7 @@ async function main() {
   testSemanticOnlyEvidenceIsTreatedAsModelClaim();
   testVerifierModelIsSkippedForPlanningMetaTasks();
   testPartialFinalWithFailedEvidenceDoesNotMarkGoalCompleted();
+  testFinalIsBlockedUntilPlannedTasksReachTerminalState();
   console.log("agent orchestration tests passed");
 }
 

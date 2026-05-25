@@ -10,12 +10,26 @@ const { DEFAULT_COMMANDER_MODELS, DEFAULT_CONFIG, dedupeModelPoolsByTier, loadRu
 
 let dynamicFreeCache = { expiresAt: 0, models: [] };
 
+function commanderModelAlias(model) {
+  const id = String(model || "")
+    .trim()
+    .toLowerCase();
+  if (/^(?:cx|codex)\/gpt-?5\.5$/.test(id) || /^gpt-?5\.5$/.test(id)) return "gpt5.5";
+  return id;
+}
+
 function splitModelList(value) {
-  return uniqueModels(String(value || "").split(/[\n,]+/));
+  return uniqueModels(
+    String(value || "")
+      .split(/[\n,]+/)
+      .map(commanderModelAlias)
+  );
 }
 
 function configuredCommanderModelsFromEnv() {
-  return splitModelList(process.env.AGENT_ROUTE_COMMANDER_MODELS || process.env.AGENT_ROUTE_COMMANDER_MODEL || "");
+  return splitModelList(
+    process.env.AGENT_ROUTE_COMMANDER_MODELS || process.env.AGENT_ROUTE_COMMANDER_MODEL || ""
+  ).filter((model) => model === "gpt5.5");
 }
 
 function modelIdFromProviderModel(connection, model) {
@@ -96,10 +110,31 @@ function activeProviderModelScore(model) {
 }
 
 function isAllowedCommanderModel(model) {
-  const id = String(model || "").toLowerCase();
+  const id = String(model || "")
+    .trim()
+    .toLowerCase();
+  const alias = commanderModelAlias(id);
   const explicitCommanderModels = configuredCommanderModelsFromEnv().map((item) => item.toLowerCase());
-  if (explicitCommanderModels.length) return explicitCommanderModels.includes(id);
-  return /^(cx|codex)\/gpt-[a-z0-9_.-]+$/.test(id);
+  if (explicitCommanderModels.length) {
+    return explicitCommanderModels.includes(id) || explicitCommanderModels.map(commanderModelAlias).includes(alias);
+  }
+  return alias === "gpt5.5";
+}
+
+function matchingAllowedCommanderModel(requested, allowedModels = []) {
+  const requestedId = String(requested || "")
+    .trim()
+    .toLowerCase();
+  if (!requestedId) return "";
+  const requestedAlias = commanderModelAlias(requestedId);
+  for (const model of allowedModels) {
+    const modelId = String(model || "").trim();
+    if (!modelId) continue;
+    if (modelId.toLowerCase() === requestedId || commanderModelAlias(modelId) === requestedAlias) {
+      return commanderModelAlias(modelId) === "gpt5.5" ? "gpt5.5" : modelId;
+    }
+  }
+  return "";
 }
 
 function applyActiveProviderModels(config) {
@@ -291,15 +326,13 @@ function getRequestedCommanderModel(body, config) {
   const requested = String(raw || "").trim();
   if (!requested) return "";
   if (explicitCommanderModels.length) {
-    const allowed = new Set(explicitCommanderModels.map((model) => model.toLowerCase()));
-    return allowed.has(requested.toLowerCase()) ? requested : "";
+    return matchingAllowedCommanderModel(requested, explicitCommanderModels);
   }
-  const allowed = new Set(
-    uniqueModels([...DEFAULT_COMMANDER_MODELS, ...((config.modelPools || {}).commander || [])]).filter(
-      isAllowedCommanderModel
-    )
-  );
-  return allowed.has(requested) ? requested : "";
+  const allowedModels = uniqueModels([
+    ...DEFAULT_COMMANDER_MODELS,
+    ...((config.modelPools || {}).commander || [])
+  ]).filter(isAllowedCommanderModel);
+  return matchingAllowedCommanderModel(requested, allowedModels);
 }
 
 function resolveCommanderRoute(body, config) {

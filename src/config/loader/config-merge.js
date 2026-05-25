@@ -21,6 +21,16 @@ function uniqueModels(models) {
   ];
 }
 
+function normalizeCommanderModelId(value) {
+  const model = String(value || "").trim();
+  if (/^(?:cx|codex)\/gpt-?5\.5$/i.test(model) || /^gpt-?5\.5$/i.test(model)) return "gpt5.5";
+  return model;
+}
+
+function isSupportedCommanderModel(model) {
+  return normalizeCommanderModelId(model).toLowerCase() === "gpt5.5";
+}
+
 function promptText(value, fallback) {
   const text = String(value == null ? "" : value).trim();
   return (text || fallback || "").slice(0, 8000);
@@ -57,7 +67,7 @@ function normalizePromptSettings(raw, defaults = DEFAULT_PROMPT_SETTINGS) {
 
 function isCommanderGradeModel(model) {
   const id = String(model || "").toLowerCase();
-  return id.includes("gpt-5") || id.includes("codex-xhigh") || id.includes("cx/gpt-");
+  return id === "gpt5.5" || id.includes("gpt-5") || id.includes("codex-xhigh") || id.includes("cx/gpt-");
 }
 
 function cleanModelPoolsForTier(modelPools, defaults = DEFAULT_MODEL_POOLS) {
@@ -68,6 +78,8 @@ function cleanModelPoolsForTier(modelPools, defaults = DEFAULT_MODEL_POOLS) {
     const models = uniqueModels(raw);
     output[key] = models.length ? models : fallback.slice();
   }
+  output.commander = uniqueModels(output.commander.map(normalizeCommanderModelId)).filter(isSupportedCommanderModel);
+  if (!output.commander.length) output.commander = (defaults.commander || []).slice();
   output.coding = uniqueModels(output.coding).filter((model) => !isCommanderGradeModel(model));
   if (!output.coding.length) output.coding = (defaults.coding || []).slice();
   return output;

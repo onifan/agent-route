@@ -1,46 +1,55 @@
-# 开发和运维
+# 开发与运维
 
-本文档记录 AgentRoute Studio 的本地开发、测试、运行恢复、场景测试和故障排查。
+本文档记录本地开发、测试、构建、生产启动、本地 API key 与故障排查。
+
+## 环境要求
+
+- Node.js `>=22`、npm。
+- macOS 或 Linux。
+- 浏览器工具需要 Playwright 可用的 Chrome（channel 默认 `chrome`，见 [配置指南](configuration.md)）。
+- 本地持久化需要可选依赖 `better-sqlite3`；它放在 `optionalDependencies`，缺少构建工具时安装不会失败，相关功能会返回明确错误。
 
 ## 常用命令
 
 ```bash
-npm run format
-npm run format:check
-npm run lint
-npm test
-npm run build
+npm run dev              # 开发模式，端口 20128（next dev --webpack）
+npm run dev:lan          # 同上，但开放局域网（AGENT_ROUTE_ALLOW_LAN_DEV=1 + 0.0.0.0）
+npm run build            # next build（输出到 .next-cli-build）+ scripts/build.js 结构校验
+npm run build:next       # 仅 next build
+npm run start:production  # 启动 .next-cli-build/standalone/server.js（默认绑定 127.0.0.1）
+npm run format           # Prettier 写入
+npm run format:check     # Prettier 仅检查
+npm run lint             # ESLint
+npm test                 # 运行 src 下全部 *.test.js
 ```
 
-命令说明：
+也提供 bun 变体：`dev:bun`、`build:bun`、`start:bun`。
 
-- `format`：用 Prettier 格式化 `src`、`app`、`scripts`、根目录配置、Markdown 和 docs。
-- `format:check`：检查格式，不写入文件。
-- `lint`：运行 ESLint。
-- `test`：运行当前 Node 测试。
-- `build`：运行 Next 构建并执行项目结构校验脚本。
+> 构建输出目录是 `.next-cli-build`（在 `next.config.mjs` 用 `distDir` 指定），不是默认的 `.next`。`output: "standalone"`，并把 `/v1/:path*` rewrite 到 `/api/v1/:path*`。
 
-## 测试范围
+## 测试
 
-`npm test` 覆盖：
+`npm test` 串行运行 `src/` 下的测试文件（Node 原生 `assert`，无测试框架），覆盖：
 
-- 安全回归
-- 配置加载器
-- storage repositories
-- tools runtime
-- evidence normalizer
-- verification file intent
-- authenticity
-- corrective actions
-- action decision
-- action learning
-- decision attribution
-- recovery
-- dashboard
-- task runtime
-- memory runtime
-- internal model service
-- observability runtime
+```text
+security-regression · config-loader · storage-repositories · tools-runtime
+provider-oauth-runtime · agent-evidence · agent-verification-file-intent
+agent-authenticity · agent-corrective · agent-action-decision · agent-action-learning
+agent-decision-attribution · agent-recovery · agent-document-generation
+agent-route-dashboard · agent-orchestration · agent-route-task-runtime
+agent-route-memory-runtime · agent-route-model-proxy · agent-route-observability-runtime
+agent-mcp-server · agent-mcp-worker-client · agent-langgraph-runner
+```
+
+单独运行某个测试：
+
+```bash
+node src/agent-langgraph-runner.test.js
+```
+
+## 构建校验（`scripts/build.js`）
+
+`npm run build` 在 `next build` 之后运行该脚本，做结构与语法校验：检查关键页面 / API 路由 / runtime 入口文件是否存在、agent 各模块目录是否齐全、并对若干源文件做内容断言（如 studio 页面包含任务生命周期视图、Memory 视图等）。任一检查失败会抛错中断构建，全部通过时打印 `Build validation passed.`。
 
 ## 生产启动
 
@@ -49,179 +58,56 @@ npm run build
 npm run start:production
 ```
 
-如果 standalone 构建不存在，`scripts/start-production.js` 会提示先运行 `npm run build`。
+`start-production.js` 会检查 `.next-cli-build/standalone/server.js` 是否存在，默认设置 `HOSTNAME=127.0.0.1`。要对外暴露需显式设置 `HOSTNAME=0.0.0.0`（脚本会警告），并务必配置本地 API key。
 
-## 主要页面
+## 本地 API key
 
-地址：
+当存在启用的本地 API key 时，跨域 / 非 UI 调用必须携带它（见 [安全设计](security.md)）。用脚本生成 / 查看：
 
-```text
-/agent-route
+```bash
+node scripts/create-api-key.js                 # 创建名为 "default" 的 key
+node scripts/create-api-key.js --name "my-ide"  # 指定名称
+node scripts/create-api-key.js --list           # 列出现有 active key
+AGENT_ROUTE_DB=/path/to/data.sqlite node scripts/create-api-key.js  # 指定数据库
 ```
 
-页面包含：
+数据库位置解析顺序：`AGENT_ROUTE_DB` → `$AGENT_ROUTE_HOME|$DATA_DIR/db/data.sqlite` → `~/.agent-route-studio/db/data.sqlite`。
 
-- 控制中心
-- 目标和任务列表
-- 任务执行图
-- 任务详情
-- 风险和人工确认
-- 验证和真实性判断
-- 建议动作和排序
-- 行为经验和决策归因
-- 运行监控中心
-- 恢复摘要
-- 模型、prompt 和主题设置
+调用时携带：
+
+```bash
+curl -X POST http://localhost:20128/api/agent-route/run \
+  -H "Authorization: Bearer <key>" \
+  -H "Content-Type: application/json" \
+  -d '{ "action": "config_status" }'
+```
 
 ## 运行恢复
 
-服务重启、进程被杀、Mac 或服务器断电后，系统可以扫描 repository 里的持久化状态并做安全恢复。
-
-恢复原则：
-
-- `running` task 不会继续假装在执行，会被安全标记为 blocked 或可重试状态。
-- `waiting_human` task 保持等待人工确认。
-- `completed`、`failed`、`cancelled` task 不会被错误修改。
-- 旧 browser session 默认 stale，不自动复用。
-- 丢失的 Codex CLI 或 worker 进程不会被假设成功。
-- 如果存在 evidence 或 artifact，也必须经过 verification 才能算完成。
-
-查询恢复摘要：
+重启后可用 action 查询和触发恢复（处理残留 running task、worker lost、stale browser session 等）：
 
 ```bash
-curl -X POST http://localhost:20128/api/agent-route/run \
-  -H "Content-Type: application/json" \
-  -d '{
-    "action": "recovery_status"
-  }'
+curl -X POST http://localhost:20128/api/agent-route/run -d '{ "action": "recovery_status" }'
+curl -X POST http://localhost:20128/api/agent-route/run -d '{ "action": "run_recovery" }'
 ```
 
-手动运行恢复扫描：
-
-```bash
-curl -X POST http://localhost:20128/api/agent-route/run \
-  -H "Content-Type: application/json" \
-  -d '{
-    "action": "run_recovery"
-  }'
-```
-
-恢复事件会进入事件流和运行监控中心。
-
-## Evidence 和 Verification
-
-所有 worker 都应该返回 evidence。系统会先标准化 evidence，再进入 verification。
-
-browser evidence 会统一包含：
-
-- `type`
-- `evidenceSource`
-- `action`
-- `detectedActionType`
-- `url`
-- `previousUrl`
-- `nextUrl`
-- `urlChanged`
-- `title`
-- `textPreview`
-- `screenshotPath`
-- `snapshotPath`
-- `durationMs`
-- `ok`
-- `confidence`
-- `resourceUsage`
-
-文件验证前会经过 file intent detector。`Node.js`、`React`、`Next.js`、`Python`、`Docker`、`AWS` 等技术词不会因为看起来像扩展名就被误判成文件路径。
-
-## 真实性和建议决策
-
-False Success Detection 会给结果打 `authenticityScore`：
-
-- `0.85` 到 `1.0`：高度可信
-- `0.7` 到 `0.85`：可信
-- `0.55` 到 `0.7`：弱可信
-- `0.35` 到 `0.55`：可疑
-- `<0.35`：高度可疑
-
-常见 warning：
-
-- 重复项目
-- 空标题
-- 空链接
-- 占位文本
-- 字段完整率低
-- 页面证据不足
-- 结果像 hallucination
-
-Corrective Action Engine 会生成建议动作，Action Decision Engine 会排序，但不会自动执行。最终是否重试、人工复核、取消或继续，仍由用户或上层流程决定。
-
-## 开发约定
-
-请保持这些模块边界：
-
-- 普通模型路由不要依赖 agent 模块。
-- 任务状态变化必须走任务模块或 repository 封装。
-- worker result 必须包含 evidence，不能只返回“成功了”。
-- task completed 必须经过 verification。
-- high 或 critical risk 且未批准时，工具不能执行。
-- budget 可以阻止 retry、降低模型等级或暂停流程。
-- strategy 高于单个 task，planner 不能生成违反 strategy 的任务。
-- dependency graph 决定哪些 task ready。
-- tools 不写 memory、不改 task、不做业务判断。
-- storage repository 不反向依赖 orchestrator。
-- config loader 不依赖 agent/orchestrator，避免循环依赖。
-- 不要记录或提交敏感信息。
+恢复策略在 `src/config/policies/recovery-policy.js`，逻辑在 `src/agent/recovery`。
 
 ## 故障排查
 
-### 页面 404
+- **内部模型调用报错 "Configure AGENT_ROUTE_UPSTREAM_CHAT_URL …"**：未配置上游。设置 `AGENT_ROUTE_UPSTREAM_CHAT_URL` + `AGENT_ROUTE_UPSTREAM_API_KEY`，或在控制台添加启用的 provider 连接（见 [配置指南](configuration.md)）。
+- **`/api/agent-route/run` 跑目标返回 410**：旧 SSE 目标流已禁用，改用 `/api/agent-route/ui-stream`（见 [API 参考](api.md)）。
+- **`/v1/*` 返回 404**：公开兼容入口被显式关闭，符合预期。
+- **跨域请求 401**：已配置本地 API key，但请求未携带或无效；带上 `Authorization: Bearer <key>`，或确认为同源请求。
+- **预检 403**：origin 不在白名单。配置 `AGENT_ROUTE_ALLOWED_ORIGINS`，或在开发环境用 loopback origin。
+- **持久化相关报错**：可能是 `better-sqlite3` 不可用。安装构建工具后重装，或接受退化为内存 / JSON 行为。
+- **任务一直 blocked / waiting_human**：命中风险闸门或预算 / 策略停止条件；查看 `risk_monitor`、`budget_monitor` 和 task 详情，必要时用 `approve_task` 批准。
 
-请访问：
-
-```text
-http://localhost:20128/agent-route
-```
-
-如果你访问旧 dashboard 路径，它应该跳转到当前工作台。
-
-### 局域网其他电脑打不开
-
-开发环境默认只允许 localhost 和 127.0.0.1。需要局域网访问时：
+## 提交前检查
 
 ```bash
-AGENT_ROUTE_ALLOW_LAN_DEV=1 npm run dev -- --hostname 0.0.0.0
-```
-
-同时确认系统防火墙允许端口 `20128`。
-
-### 生产启动提示 standalone build missing
-
-先运行：
-
-```bash
+npm run format:check
+npm run lint
+npm test
 npm run build
 ```
-
-再运行：
-
-```bash
-npm run start:production
-```
-
-### Playwright 不可用
-
-browser 工具支持 mock adapter。真实 Playwright adapter 是可选能力。如果本地没有安装或配置 Playwright，测试仍应优先使用 mock adapter 或受控页面，不依赖外部真实网站。
-
-### 任务显示 blocked
-
-blocked 不一定代表系统坏了。常见原因：
-
-- 风险过高，需要人工确认。
-- 上游依赖失败或被阻塞。
-- verification 没有通过。
-- authenticity score 太低。
-- 预算或 retry 超限。
-- 重启后 worker 丢失，恢复机制安全阻塞。
-- browser session 已失效。
-
-请在任务详情中查看 blocked reason、verification reasons、authenticity warnings、risk history 和 event timeline。
