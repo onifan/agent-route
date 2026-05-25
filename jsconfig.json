@@ -1,0 +1,11 @@
+{
+  "compilerOptions": {
+    "baseUrl": ".",
+    "paths": {
+      "@/shared/components": ["app/shared/components/index.js"],
+      "@/shared/components/*": ["app/shared/components/*"],
+      "@/store/*": ["src/store/*"],
+      "@/*": ["src/*"]
+    }
+  }
+}

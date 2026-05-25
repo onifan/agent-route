@@ -1,0 +1,45 @@
+function allowedDevOrigins() {
+  const local = ["localhost", "127.0.0.1", "[::1]"];
+  if (process.env.AGENT_ROUTE_ALLOW_LAN_DEV !== "1") return local;
+  return [
+    ...local,
+    "192.168.*.*",
+    "10.*.*.*",
+    "172.16.*.*",
+    "172.17.*.*",
+    "172.18.*.*",
+    "172.19.*.*",
+    "172.20.*.*",
+    "172.21.*.*",
+    "172.22.*.*",
+    "172.23.*.*",
+    "172.24.*.*",
+    "172.25.*.*",
+    "172.26.*.*",
+    "172.27.*.*",
+    "172.28.*.*",
+    "172.29.*.*",
+    "172.30.*.*",
+    "172.31.*.*"
+  ];
+}
+
+const nextConfig = {
+  distDir: ".next-cli-build",
+  output: "standalone",
+  allowedDevOrigins: allowedDevOrigins(),
+  devIndicators: process.env.AGENT_ROUTE_SHOW_NEXT_DEV_INDICATOR === "1" ? { position: "bottom-right" } : false,
+  images: {
+    unoptimized: true
+  },
+  async rewrites() {
+    return [
+      {
+        source: "/v1/:path*",
+        destination: "/api/v1/:path*"
+      }
+    ];
+  }
+};
+
+export default nextConfig;

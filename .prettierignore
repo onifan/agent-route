@@ -1,0 +1,11 @@
+node_modules/
+.next/
+.next-cli-build/
+standalone/
+coverage/
+.cache/
+*.log
+*.sqlite
+*.sqlite3
+*.db
+src/mitm/server.js
