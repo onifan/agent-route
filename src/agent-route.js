@@ -11,6 +11,7 @@ module.exports = {
   DEFAULT_MODEL_POOLS: orchestrator.DEFAULT_MODEL_POOLS,
   DEFAULT_PROMPT_SETTINGS: orchestrator.DEFAULT_PROMPT_SETTINGS,
   handleAgentRouteRun: orchestrator.handleAgentRouteRun,
+  handleAgentRouteUiStream: orchestrator.handleAgentRouteUiStream,
   handleInternalModelRequest: router.handleInternalModelRequest,
   withLocalApiKey: router.withLocalApiKey
 };

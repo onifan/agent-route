@@ -12,10 +12,11 @@
 - `finalizer.js`：最终回答综合提示词。
 - `codex-cli-runner.js`：本地 Codex CLI 执行与日志过滤。
 - `result-normalizer.js`：worker result、risk/budget/verification gate 结果标准化。
-- `event-stream.js`：SSE 事件包装、顺序输出、观测事件记录。
+- `event-stream.js`：Vercel AI SDK UIMessage stream 事件包装、顺序输出、观测事件记录。
 - `action-api.js`：dashboard/API 触发的人工确认、任务管理、监控查询等操作。
 - `goal-setup.js`：goal 运行上下文、memory、strategy、budget 初始化。
 - `initial-planning.js`：初始规划器调用、planner 结果恢复/规范化、第一批任务追加。
+- `langgraph-runner.js`：LangGraph `StateGraph` 运行入口，承载 UIMessage stream 的目标执行路径和节点运行态事件。
 - `task-appender.js`：planner/review 任务规范化、战略约束、任务图写入。
 - `task-executor.js`：任务摘要、暂停/终态判断、ready task drain 调度。
 - `loop-controller.js`：主循环预算/战略停止条件 guard。

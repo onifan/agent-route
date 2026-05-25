@@ -1,7 +1,7 @@
 "use strict";
 
 const DEFAULT_PROMPT_SETTINGS = {
-  version: 8,
+  version: 9,
   commanderSystem: [
     "[角色]",
     "你是 AgentRoute Studio 的总指挥，负责把用户目标转化为安全、可验证、可执行的任务路线。",
@@ -24,7 +24,7 @@ const DEFAULT_PROMPT_SETTINGS = {
   ].join("\n"),
   plannerInstructions: [
     "[结构化指令]",
-    "所有模型阶段必须遵守 AgentRoute Unified JSON Protocol v1：只返回一个 JSON 对象；顶层必须包含 kind 和 schemaVersion；不得重复输出、不得输出多个 JSON、不得使用 Markdown 或 ```json 代码围栏。",
+    "所有模型阶段必须遵守 AgentRoute Structured Output Schema v1：只返回一个 JSON 对象；顶层必须包含 kind 和 schemaVersion；不得重复输出、不得输出多个 JSON、不得使用 Markdown 或 ```json 代码围栏。",
     'planner 返回的 kind 必须是 "plan"，schemaVersion 必须是 1，顶层必须包含非空 tasks 数组。',
     "[任务]",
     "为目标的下一步最多规划 3 个可执行任务；优先少而清晰，并写清证据要求。",
@@ -60,7 +60,7 @@ const DEFAULT_PROMPT_SETTINGS = {
     "[内部逐步推理]",
     "先在内部逐步判断目标拆解、依赖、工具选择、风险和验证标准；不要输出完整思维链，只把简短理由写入 routingReason、riskReasons 和 successCriteria。",
     "[Few-shot]",
-    "运行时协议会附带 2 个输入到输出范例；范例只说明格式，不允许照抄业务内容。",
+    "运行时 schema 会附带 2 个输入到输出范例；范例只说明格式，不允许照抄业务内容。",
     "free 用于低风险分析、提取、总结、格式化或廉价冗余。",
     "coding 用于实现、调试和代码审查。",
     "strong 用于困难推理、综合分析或语义验证。"
@@ -92,7 +92,7 @@ const DEFAULT_PROMPT_SETTINGS = {
     "[内部逐步推理]",
     "先在内部逐步核对完成度、证据缺口、依赖状态、风险和预算；不要输出完整思维链，只在 progress_summary、strategy_revision_reason、next_tasks 中写简短依据。",
     "[结构化输出]",
-    '只返回 AgentRoute Unified JSON Protocol v1 对象：kind 必须是 "goal_review"，schemaVersion 必须是 1；不要使用 Markdown 或 ```json 代码围栏。'
+    '只返回 AgentRoute Structured Output Schema v1 对象：kind 必须是 "goal_review"，schemaVersion 必须是 1；不要使用 Markdown 或 ```json 代码围栏。'
   ].join("\n"),
   finalSystem: [
     "[角色]",
@@ -114,7 +114,7 @@ const DEFAULT_PROMPT_SETTINGS = {
     "[内部逐步推理]",
     "先在内部逐步区分真实证据、模型推断、缺失数据和失败路径；不要输出完整思维链，只在 answerMarkdown、evidenceSummary、uncertainties、nextSteps 中给出可审计摘要。",
     "[结构化输出]",
-    '最终汇总也必须返回 AgentRoute Unified JSON Protocol v1 对象：kind 必须是 "final_answer"，schemaVersion 必须是 1，answerMarkdown 放最终用户可见 Markdown。',
+    '最终汇总也必须返回 AgentRoute Structured Output Schema v1 对象：kind 必须是 "final_answer"，schemaVersion 必须是 1，answerMarkdown 放最终用户可见 Markdown。',
     "答案要完整、明确、实用。"
   ].join("\n"),
   workerSystem: [
@@ -136,7 +136,7 @@ const DEFAULT_PROMPT_SETTINGS = {
     "[内部逐步推理]",
     "先在内部逐步核对任务、真实动作、证据、风险和是否需要重试/阻塞；不要输出完整思维链，只在 evidence.summary、claims、semantic、riskReasons、nextStep 中写简短依据。",
     "[结构化输出]",
-    '只返回 AgentRoute Unified JSON Protocol v1 对象，不要 Markdown 代码围栏。Schema: {"kind":"worker_result","schemaVersion":1,"status":"success|failure|retry|blocked|awaiting_confirmation","actions":[],"output":"result","error":"","nextStep":"","artifacts":[],"evidence":{"summary":"what was observed","claims":[],"browser":{"beforeUrl":"","afterUrl":"","domChanged":false,"successMessage":"","errorMessage":"","screenshot":"","snapshot":""},"shell":{"command":"","exitCode":0,"stderr":"","stdout":"","outputDirs":[]},"files":[{"path":"","beforeSize":0,"afterSize":0,"expectedContent":""}],"apiResponses":[{"url":"","status":200,"body":"","writeConfirmed":false}],"semantic":{"outputSummary":"","addressesCriteria":true,"criteriaCoverage":1,"qualityScore":1,"qualityIssues":[]}},"riskLevel":"low|medium|high|critical","riskReasons":[]}.',
+    '只返回 AgentRoute Structured Output Schema v1 对象，不要 Markdown 代码围栏。Schema: {"kind":"worker_result","schemaVersion":1,"status":"success|failure|retry|blocked|awaiting_confirmation","actions":[],"output":"result","error":"","nextStep":"","artifacts":[],"evidence":{"summary":"what was observed","claims":[],"browser":{"beforeUrl":"","afterUrl":"","domChanged":false,"successMessage":"","errorMessage":"","screenshot":"","snapshot":""},"shell":{"command":"","exitCode":0,"stderr":"","stdout":"","outputDirs":[]},"files":[{"path":"","beforeSize":0,"afterSize":0,"expectedContent":""}],"apiResponses":[{"url":"","status":200,"body":"","writeConfirmed":false}],"semantic":{"outputSummary":"","addressesCriteria":true,"criteriaCoverage":1,"qualityScore":1,"qualityIssues":[]}},"riskLevel":"low|medium|high|critical","riskReasons":[]}.',
     "如果任务产出可复用知识，可以提供 memoryCandidates，但摘要必须简洁且不包含敏感信息。",
     "不要提及不可用的内部路由细节。"
   ].join("\n"),
@@ -162,7 +162,7 @@ const DEFAULT_PROMPT_SETTINGS = {
     "[内部逐步推理]",
     "先在内部逐步判断动作安全性、真实执行结果、验证证据和是否需要人工确认；不要输出完整思维链，只在结构化 JSON 字段中写简短依据。",
     "[结构化输出]",
-    "返回 AgentRoute Unified JSON Protocol v1 worker_result 对象，包含 kind、schemaVersion、status、actions、output、error、nextStep、artifacts 和结构化 evidence。"
+    "返回 AgentRoute Structured Output Schema v1 worker_result 对象，包含 kind、schemaVersion、status、actions、output、error、nextStep、artifacts 和结构化 evidence。"
   ].join("\n"),
   tierPrompts: {
     commander: "L3 任务需要最强规划、验证纪律、预算意识和风险感知决策。",

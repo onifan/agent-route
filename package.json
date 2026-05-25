@@ -11,7 +11,7 @@
     "format": "prettier --no-error-on-unmatched-pattern --write \"src/**/*.js\" \"app/**/*.js\" \"app/**/*.json\" \"scripts/**/*.js\" \"*.js\" \"*.mjs\" \"*.json\" \"*.md\" \"docs/**/*.md\" \".github/**/*.yml\"",
     "format:check": "prettier --no-error-on-unmatched-pattern --check \"src/**/*.js\" \"app/**/*.js\" \"app/**/*.json\" \"scripts/**/*.js\" \"*.js\" \"*.mjs\" \"*.json\" \"*.md\" \"docs/**/*.md\" \".github/**/*.yml\"",
     "lint": "eslint --no-config-lookup --parser-options '{\"ecmaVersion\":\"latest\",\"sourceType\":\"module\",\"ecmaFeatures\":{\"jsx\":true}}' src/*.js src/agent/**/*.js src/core/**/*.js src/config/**/*.js src/storage/**/*.js src/tools/**/*.js src/security/**/*.js src/shared/**/*.js src/lib/**/*.js src/store/**/*.js app/**/*.js scripts/*.js",
-    "test": "node src/security-regression.test.js && node src/config-loader.test.js && node src/storage-repositories.test.js && node src/tools-runtime.test.js && node src/provider-oauth-runtime.test.js && node src/agent-evidence.test.js && node src/agent-verification-file-intent.test.js && node src/agent-authenticity.test.js && node src/agent-corrective.test.js && node src/agent-action-decision.test.js && node src/agent-action-learning.test.js && node src/agent-decision-attribution.test.js && node src/agent-recovery.test.js && node src/agent-document-generation.test.js && node src/agent-route-dashboard.test.js && node src/agent-orchestration.test.js && node src/agent-route-task-runtime.test.js && node src/agent-route-memory-runtime.test.js && node src/agent-route-model-proxy.test.js && node src/agent-route-observability-runtime.test.js",
+    "test": "node src/security-regression.test.js && node src/config-loader.test.js && node src/storage-repositories.test.js && node src/tools-runtime.test.js && node src/provider-oauth-runtime.test.js && node src/agent-evidence.test.js && node src/agent-verification-file-intent.test.js && node src/agent-authenticity.test.js && node src/agent-corrective.test.js && node src/agent-action-decision.test.js && node src/agent-action-learning.test.js && node src/agent-decision-attribution.test.js && node src/agent-recovery.test.js && node src/agent-document-generation.test.js && node src/agent-route-dashboard.test.js && node src/agent-orchestration.test.js && node src/agent-route-task-runtime.test.js && node src/agent-route-memory-runtime.test.js && node src/agent-route-model-proxy.test.js && node src/agent-route-observability-runtime.test.js && node src/agent-mcp-server.test.js && node src/agent-mcp-worker-client.test.js && node src/agent-langgraph-runner.test.js",
     "build": "next build --webpack && node scripts/build.js",
     "build:next": "next build --webpack",
     "start": "next start",
@@ -22,12 +22,17 @@
     "dev:lan": "AGENT_ROUTE_ALLOW_LAN_DEV=1 next dev --webpack --hostname 0.0.0.0 --port 20128"
   },
   "dependencies": {
+    "@ai-sdk/react": "^3.0.193",
+    "@langchain/langgraph": "^1.3.2",
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "ai": "^6.0.191",
     "material-symbols": "^0.44.6",
     "next": "^16.1.6",
     "playwright-core": "^1.60.0",
     "react": "19.2.4",
     "react-dom": "19.2.4",
     "undici": "^7.19.2",
+    "zod": "^4.4.3",
     "zustand": "^5.0.10"
   },
   "optionalDependencies": {

@@ -6,7 +6,11 @@ const { corsHeaders } = require("../../security/cors");
 const { checkRequestAuth } = require("../../security/request-auth");
 
 let localApiKeyCache = { expiresAt: 0, key: "" };
-let providerDbCache = { expiresAt: 0, dbPath: "", snapshot: { settings: {}, connections: [], providerNodes: [] } };
+let providerDbCache = {
+  expiresAt: 0,
+  dbPath: "",
+  snapshot: { settings: {}, connections: [], providerNodes: [], modelAliases: {} }
+};
 
 const OPENAI_COMPAT_PROVIDER_TARGETS = {
   openrouter: {
@@ -89,6 +93,14 @@ function safeJsonObject(value) {
   }
 }
 
+function safeJsonValue(value, fallback = "") {
+  try {
+    return JSON.parse(String(value || "null")) || fallback;
+  } catch {
+    return fallback;
+  }
+}
+
 function normalizeOAuthData(value = {}) {
   const input = value && typeof value === "object" && !Array.isArray(value) ? value : {};
   return {
@@ -135,7 +147,7 @@ function readProviderDbSnapshot() {
   const dbPath = dataDbPath();
   if (providerDbCache.expiresAt > now && providerDbCache.dbPath === dbPath) return providerDbCache.snapshot;
 
-  const snapshot = { settings: {}, connections: [], providerNodes: [] };
+  const snapshot = { settings: {}, connections: [], providerNodes: [], modelAliases: {} };
   try {
     if (!fs.existsSync(dbPath)) {
       providerDbCache = { expiresAt: now + 10 * 1000, dbPath, snapshot };
@@ -195,6 +207,14 @@ function readProviderDbSnapshot() {
         })
         .filter((node) => node.id && node.baseUrl);
     } catch {}
+    try {
+      const rows = db.prepare("SELECT key, value FROM kv WHERE scope = 'modelAliases'").all();
+      snapshot.modelAliases = Object.fromEntries(
+        rows
+          .map((row) => [String(row.key || "").trim(), safeJsonValue(row.value, "")])
+          .filter(([key, value]) => key && value)
+      );
+    } catch {}
     db.close();
   } catch (err) {
     console.warn("[core-router] failed to read provider database:", err.message);
@@ -204,7 +224,11 @@ function readProviderDbSnapshot() {
 }
 
 function clearProviderDbCache() {
-  providerDbCache = { expiresAt: 0, dbPath: "", snapshot: { settings: {}, connections: [], providerNodes: [] } };
+  providerDbCache = {
+    expiresAt: 0,
+    dbPath: "",
+    snapshot: { settings: {}, connections: [], providerNodes: [], modelAliases: {} }
+  };
   localApiKeyCache = { expiresAt: 0, key: "" };
 }
 
@@ -419,6 +443,21 @@ function targetsFromConfiguredProvider(model) {
   return activeApiKeyConnections(provider, connectionAliases).map((connection) =>
     targetForProviderConnection(model, provider, target, connection)
   );
+}
+
+function resolveModelAlias(model) {
+  let current = String(model || "").trim();
+  if (!current) return "";
+  const seen = new Set();
+  for (let index = 0; index < 8; index += 1) {
+    const aliases = readProviderDbSnapshot().modelAliases || {};
+    const lower = current.toLowerCase();
+    const next = String(aliases[current] || aliases[lower] || "").trim();
+    if (!next || next === current || seen.has(next)) return current;
+    seen.add(current);
+    current = next;
+  }
+  return current;
 }
 
 function uniqueModelProxyTargets(targets = []) {
@@ -680,106 +719,6 @@ async function responseForSuccessfulUpstream(upstream, target, originalBody, end
   });
 }
 
-function responseForSuccessfulCurlFallback(fallback, target, originalBody, endpointMode, requestOrOrigin) {
-  if (target && target.kind === "codex-oauth" && target.wireMode === "responses" && endpointMode === "chat") {
-    let data = null;
-    try {
-      data = JSON.parse(String(fallback.body || ""));
-    } catch {}
-    const content = extractResponsesOutputText(data);
-    if (!content) {
-      return jsonResponse(
-        {
-          error: {
-            message: "Codex OAuth provider returned a Responses payload without assistant text.",
-            type: "model_proxy_error",
-            code: "model_proxy_empty_response"
-          }
-        },
-        502,
-        {},
-        requestOrOrigin
-      );
-    }
-    return jsonResponse(
-      openAiChatCompletionFromText({
-        model: (originalBody && originalBody.model) || target.model,
-        content,
-        promptTokens: estimateTokens(
-          JSON.stringify(originalBody && originalBody.messages ? originalBody.messages : [])
-        ),
-        completionTokens: estimateTokens(content)
-      }),
-      200,
-      {},
-      requestOrOrigin
-    );
-  }
-  return new Response(fallback.body || "", {
-    status: fallback.status,
-    headers: filteredProxyHeaders(new Headers({ "Content-Type": "application/json" }), requestOrOrigin)
-  });
-}
-
-function curlModelProxyRequest(target, headers, body, timeoutMs) {
-  return new Promise((resolve, reject) => {
-    let execFile;
-    try {
-      execFile = require("node:child_process").execFile;
-    } catch (err) {
-      reject(err);
-      return;
-    }
-    const marker = "\n__AGENT_ROUTE_HTTP_STATUS__:";
-    const args = [
-      "-sS",
-      "-L",
-      "-m",
-      String(Math.max(1, Math.ceil(Number(timeoutMs || 120000) / 1000))),
-      "-X",
-      "POST",
-      target.url,
-      "-H",
-      "Content-Type: application/json"
-    ];
-    const proxyUrl = proxyConfigForTarget(target);
-    if (proxyUrl) args.push("--proxy", proxyUrl);
-    for (const [key, value] of Object.entries(headers || {})) {
-      if (value == null || key.toLowerCase() === "content-type" || key.toLowerCase() === "accept") continue;
-      args.push("-H", `${key}: ${value}`);
-    }
-    args.push("-d", JSON.stringify(requestBodyForTarget(target, body)), "-w", `${marker}%{http_code}`);
-    execFile(
-      "curl",
-      args,
-      {
-        timeout: Number(timeoutMs || 120000) + 5000,
-        maxBuffer: 16 * 1024 * 1024,
-        windowsHide: true
-      },
-      (err, stdout = "", stderr = "") => {
-        if (err) {
-          const message = redactErrorText(stderr || err.message || String(err));
-          reject(new Error(message || "curl fallback failed"));
-          return;
-        }
-        const output = String(stdout || "");
-        const markerIndex = output.lastIndexOf(marker);
-        if (markerIndex < 0) {
-          resolve({
-            status: 502,
-            body: output || JSON.stringify({ error: { message: "curl fallback returned no status" } })
-          });
-          return;
-        }
-        const responseBody = output.slice(0, markerIndex);
-        const status = Number(output.slice(markerIndex + marker.length).trim()) || 502;
-        resolve({ status, body: responseBody });
-      }
-    );
-  });
-}
-
 function requestPathname(req) {
   try {
     return new URL(req.url).pathname;
@@ -803,7 +742,7 @@ function isAgentRouteRunUrl(url) {
 }
 
 function modelProxyTargets(body, endpointMode) {
-  const model = String((body && body.model) || "").trim();
+  const model = resolveModelAlias(body && body.model);
   const lower = model.toLowerCase();
   if (/^(cx|codex)\//i.test(model)) return targetsFromCodexOAuthProvider(model, endpointMode);
   const genericUrl =
@@ -1141,48 +1080,6 @@ async function handleModelProxy(req, options = {}) {
           {},
           req
         );
-      }
-      if (endpointMode === "chat" && !body.stream) {
-        try {
-          const fallback = await curlModelProxyRequest(currentTarget, headers, body, timeoutMs);
-          if (!hasNextTarget) {
-            if (attempts.length && isProviderConnectionFailoverError(fallback.status, fallback.body, null)) {
-              attempts.push(failoverAttemptSummary(currentTarget, fallback.status, fallback.body));
-              return allProviderConnectionsFailedResponse(
-                body && body.model,
-                attempts,
-                fallback.status,
-                req,
-                internalOptions
-              );
-            }
-            return responseForSuccessfulCurlFallback(fallback, currentTarget, body, endpointMode, req);
-          }
-          if (!isProviderConnectionFailoverError(fallback.status, fallback.body, null)) {
-            return responseForSuccessfulCurlFallback(fallback, currentTarget, body, endpointMode, req);
-          }
-          attempts.push(failoverAttemptSummary(currentTarget, fallback.status, fallback.body));
-          continue;
-        } catch (fallbackErr) {
-          attempts.push(failoverAttemptSummary(currentTarget, 0, "", fallbackErr || err));
-          if (hasNextTarget) continue;
-          return jsonResponse(
-            {
-              error: {
-                message:
-                  err && err.name === "AbortError"
-                    ? `${modelServiceLabel(internalOptions)} timed out.`
-                    : `${modelServiceLabel(internalOptions)} failed: ${redactErrorText((err && err.message) || String(err))}. Curl fallback failed: ${redactErrorText((fallbackErr && fallbackErr.message) || String(fallbackErr))}`,
-                type: "model_proxy_error",
-                code: err && err.name === "AbortError" ? "model_proxy_timeout" : "model_proxy_failed",
-                attempts
-              }
-            },
-            err && err.name === "AbortError" ? 504 : 502,
-            {},
-            req
-          );
-        }
       }
       attempts.push(failoverAttemptSummary(currentTarget, 0, "", err));
       if (hasNextTarget) continue;

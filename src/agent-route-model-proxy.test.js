@@ -20,7 +20,7 @@ fs.writeFileSync(
     maxGoalIterations: 1,
     verifierModelEnabled: false,
     modelPools: {
-      commander: ["cx/gpt-test-commander"],
+      commander: ["gpt5.5"],
       strong: ["openrouter/test-strong"],
       coding: ["openrouter/test-coding"],
       free: ["openrouter/test-free:free"]
@@ -38,6 +38,7 @@ delete process.env.GOOGLE_API_KEY;
 
 const agentRoute = require("./agent-route");
 const coreRouter = require("./core/router");
+const providerSettings = require("./core/providers");
 const modelRoutingService = require("./agent/orchestrator/model-routing-service");
 const taskRuntime = require("./agent-route-task-runtime");
 const memoryRuntime = require("./agent-route-memory-runtime");
@@ -187,6 +188,67 @@ async function testUnconfiguredModelProxyHasSpecificError() {
   assert.equal(json.error.code, "model_proxy_unconfigured");
   assert.match(json.error.message, /No upstream model route is configured/);
   assert.doesNotMatch(json.error.message, /only handles goal-driven agent requests/i);
+}
+
+async function testModelProxyResolvesModelAliasThroughProviderSettings() {
+  const providerDb = path.join(testRoot, "provider-db-model-alias", "data.sqlite");
+  const previousDb = process.env.AGENT_ROUTE_DB;
+  const previousFetch = global.fetch;
+  process.env.AGENT_ROUTE_DB = providerDb;
+  const calls = [];
+  global.fetch = async (url, options = {}) => {
+    calls.push({
+      url: String(url),
+      headers: options.headers || {},
+      body: JSON.parse(options.body || "{}")
+    });
+    return new Response(
+      JSON.stringify({
+        model: "gpt5.5",
+        choices: [{ message: { content: "ok from local provider alias" } }]
+      }),
+      {
+        status: 200,
+        headers: { "Content-Type": "application/json" }
+      }
+    );
+  };
+
+  try {
+    providerSettings.upsertProviderNode({
+      prefix: "local",
+      name: "Local Commander",
+      baseUrl: "http://localhost:48761/v1",
+      models: ["gpt-5.5"]
+    });
+    providerSettings.createProviderConnection({
+      id: "local-commander-key",
+      provider: "local",
+      name: "Local Commander",
+      apiKey: "local-secret",
+      defaultModel: "gpt-5.5",
+      testStatus: "active"
+    });
+    providerSettings.upsertModelAlias("gpt5.5", "local/gpt-5.5");
+
+    const response = await coreRouter.handleModelProxy(
+      request("http://localhost/api/v1/chat/completions", {
+        model: "gpt5.5",
+        messages: [{ role: "user", content: "hello" }]
+      }),
+      { endpointMode: "chat" }
+    );
+    assert.equal(response.status, 200);
+    const json = await response.json();
+    assert.equal(json.choices[0].message.content, "ok from local provider alias");
+    assert.equal(calls[0].url, "http://localhost:48761/v1/chat/completions");
+    assert.equal(calls[0].body.model, "gpt-5.5");
+    assert.equal(calls[0].headers.Authorization, "Bearer local-secret");
+  } finally {
+    process.env.AGENT_ROUTE_DB = previousDb;
+    global.fetch = previousFetch;
+    coreRouter.clearProviderDbCache();
+  }
 }
 
 async function testModelProxyReadsConfiguredOpenRouterProvider() {
@@ -408,6 +470,7 @@ function testCommanderRouteHonorsExplicitGptClaudePoolBeforeActiveProviders() {
     const config = {
       modelPools: {
         commander: [
+          "gpt5.5",
           "cx/gpt-5.5",
           "openrouter/anthropic/claude-sonnet-4.5",
           "gemini/gemini-3.1-pro-preview",
@@ -419,22 +482,26 @@ function testCommanderRouteHonorsExplicitGptClaudePoolBeforeActiveProviders() {
       }
     };
     const merged = modelRoutingService.applyActiveProviderModels(config);
-    assert.deepEqual(merged.modelPools.commander, ["cx/gpt-5.5"]);
+    assert.deepEqual(merged.modelPools.commander, ["gpt5.5"]);
     assert.ok(merged.modelPools.strong.some((model) => String(model).includes("deepseek")));
 
     const gptRoute = modelRoutingService.resolveCommanderRoute({ commander_model: "cx/gpt-5.5" }, merged);
-    assert.equal(gptRoute.selected, "cx/gpt-5.5");
-    assert.equal(gptRoute.models[0], "cx/gpt-5.5");
+    assert.equal(gptRoute.selected, "gpt5.5");
+    assert.equal(gptRoute.models[0], "gpt5.5");
     assert.equal(
       gptRoute.models.some((model) => String(model).includes("deepseek")),
       false
     );
 
+    const gpt55Route = modelRoutingService.resolveCommanderRoute({ commander_model: "gpt5.5" }, merged);
+    assert.equal(gpt55Route.selected, "gpt5.5");
+    assert.equal(gpt55Route.models[0], "gpt5.5");
+
     const rejectedRoute = modelRoutingService.resolveCommanderRoute(
       { commander_model: "deepseek/deepseek-chat" },
       merged
     );
-    assert.equal(rejectedRoute.selected, "cx/gpt-5.5");
+    assert.equal(rejectedRoute.selected, "gpt5.5");
     assert.equal(
       rejectedRoute.models.some((model) => /deepseek|gemini/i.test(String(model))),
       false
@@ -563,8 +630,8 @@ async function testOutboundProxyEnvAppliesToConfiguredModelFetch() {
   }
 }
 
-async function testModelProxyFallsBackToCurlWhenFetchResets() {
-  const providerDb = path.join(testRoot, "provider-db-curl", "data.sqlite");
+async function testModelProxySurfacesFetchFailureWithoutCurlFallback() {
+  const providerDb = path.join(testRoot, "provider-db-no-curl", "data.sqlite");
   createProviderDb(providerDb, [
     {
       id: "deepseek-1",
@@ -588,16 +655,10 @@ async function testModelProxyFallsBackToCurlWhenFetchResets() {
     err.cause = { code: "ECONNRESET" };
     throw err;
   };
-  let capturedArgs = [];
+  let curlCalled = false;
   childProcess.execFile = (bin, args, options, callback) => {
-    capturedArgs = [bin, ...args];
-    callback(
-      null,
-      `${JSON.stringify({
-        choices: [{ message: { content: "ok from curl fallback" } }]
-      })}\n__AGENT_ROUTE_HTTP_STATUS__:200`,
-      ""
-    );
+    curlCalled = true;
+    callback(null, "", "");
   };
 
   try {
@@ -608,14 +669,11 @@ async function testModelProxyFallsBackToCurlWhenFetchResets() {
       }),
       { endpointMode: "chat" }
     );
-    assert.equal(response.status, 200);
+    assert.equal(response.status, 502);
     const json = await response.json();
-    assert.equal(json.choices[0].message.content, "ok from curl fallback");
-    assert.equal(capturedArgs[0], "curl");
-    assert.ok(capturedArgs.includes("https://api.deepseek.com/v1/chat/completions"));
-    assert.ok(capturedArgs.some((item) => item === "Authorization: Bearer stub-key"));
-    assert.ok(capturedArgs.includes("--proxy"));
-    assert.ok(capturedArgs.includes("http://127.0.0.1:19492"));
+    assert.equal(json.error.code, "model_proxy_failed");
+    assert.match(json.error.message, /Upstream model request failed: fetch failed/);
+    assert.equal(curlCalled, false);
   } finally {
     process.env.AGENT_ROUTE_DB = previousDb;
     if (previousProxy == null) delete process.env.AGENT_ROUTE_OUTBOUND_PROXY_URL;
@@ -831,13 +889,13 @@ async function testProviderSettingsActionSavesWithoutLeakingKey() {
 async function testAgentRouteStopsWhenCommanderCannotPlan() {
   taskRuntime.resetRuntime();
   memoryRuntime.resetRuntime();
-  const response = await agentRoute.handleAgentRouteRun(
-    request("http://localhost/api/agent-route/run", {
+  const response = await agentRoute.handleAgentRouteUiStream(
+    request("http://localhost/api/agent-route/ui-stream", {
       goal_id: "goal-commander-error",
       goal: "分析这个目标并给出一个安全的执行计划",
-      commander_model: "cx/gpt-test-commander",
+      commander_model: "gpt5.5",
       model_pools: {
-        commander: ["cx/gpt-test-commander"],
+        commander: ["gpt5.5"],
         strong: ["openrouter/test-strong"],
         coding: ["openrouter/test-coding"],
         free: ["openrouter/test-free:free"]
@@ -850,21 +908,21 @@ async function testAgentRouteStopsWhenCommanderCannotPlan() {
   const text = await response.text();
   assert.match(text, /Commander could not create a plan:/);
   assert.doesNotMatch(text, /rule-planner/);
-  assert.doesNotMatch(text, /event: plan/);
-  assert.doesNotMatch(text, /event: worker_start[\s\S]*Analyze the user goal and constraints/);
+  assert.doesNotMatch(text, /data-agent-plan/);
+  assert.doesNotMatch(text, /data-agent-task[\s\S]*Analyze the user goal and constraints/);
 }
 
 async function testInvalidPlannerEndpointContentStopsRoute() {
   taskRuntime.resetRuntime();
   memoryRuntime.resetRuntime();
   const endpointMessage = "AgentRoute Studio only handles goal-driven agent requests on this endpoint.";
-  const response = await agentRoute.handleAgentRouteRun(
-    request("http://localhost/api/agent-route/run", {
+  const response = await agentRoute.handleAgentRouteUiStream(
+    request("http://localhost/api/agent-route/ui-stream", {
       goal_id: "goal-invalid-planner-content",
       goal: "创建一个计划",
-      commander_model: "cx/gpt-test-commander",
+      commander_model: "gpt5.5",
       model_pools: {
-        commander: ["cx/gpt-test-commander"],
+        commander: ["gpt5.5"],
         strong: ["openrouter/test-strong"],
         coding: ["openrouter/test-coding"],
         free: ["openrouter/test-free:free"]
@@ -886,10 +944,10 @@ async function testInvalidPlannerEndpointContentStopsRoute() {
   const text = await response.text();
   assert.match(
     text,
-    /Planner response did not contain a valid AgentRoute plan protocol object|Commander returned an invalid or empty plan/
+    /Planner response did not contain a valid structured plan object|Commander returned an invalid or empty plan/
   );
   assert.doesNotMatch(text, /rule-planner/);
-  assert.doesNotMatch(text, /event: plan/);
+  assert.doesNotMatch(text, /data-agent-plan/);
 }
 
 async function testReviewFinalMarksGoalCompleted() {
@@ -897,13 +955,13 @@ async function testReviewFinalMarksGoalCompleted() {
   memoryRuntime.resetRuntime();
   const goalId = "goal-review-final-completed";
   let callCount = 0;
-  const response = await agentRoute.handleAgentRouteRun(
-    request("http://localhost/api/agent-route/run", {
+  const response = await agentRoute.handleAgentRouteUiStream(
+    request("http://localhost/api/agent-route/ui-stream", {
       goal_id: goalId,
       goal: "基于用户提供的两条事实生成中文摘要，不需要读取文件或联网。",
-      commander_model: "cx/gpt-test-commander",
+      commander_model: "gpt5.5",
       model_pools: {
-        commander: ["cx/gpt-test-commander"],
+        commander: ["gpt5.5"],
         strong: ["openrouter/test-strong"],
         coding: ["openrouter/test-coding"],
         free: ["openrouter/test-free:free"]
@@ -965,9 +1023,25 @@ async function testReviewFinalMarksGoalCompleted() {
 
   assert.equal(response.status, 200);
   const text = await response.text();
-  assert.match(text, /event: final/);
+  assert.match(text, /data-agent-final/);
   assert.match(text, /最终答案/);
   assert.equal(taskRuntime.getGoal(goalId).status, "completed");
+}
+
+async function testLegacySseGoalRunIsDisabled() {
+  taskRuntime.resetRuntime();
+  memoryRuntime.resetRuntime();
+  const response = await agentRoute.handleAgentRouteRun(
+    request("http://localhost/api/agent-route/run", {
+      goal_id: "legacy-sse-disabled",
+      goal: "这个目标不应通过旧 SSE 入口运行"
+    }),
+    (upstreamRequest) => agentRoute.handleInternalModelRequest(upstreamRequest, { endpointMode: "chat" })
+  );
+
+  assert.equal(response.status, 410);
+  const json = await response.json();
+  assert.equal(json.error.code, "agent_route_legacy_sse_disabled");
 }
 
 async function testCancelInternalRouteStepIsNoop() {
@@ -1013,19 +1087,21 @@ async function run() {
   try {
     await testModelProxyUsesCodexOAuthConnectionsWithFailover();
     await testUnconfiguredModelProxyHasSpecificError();
+    await testModelProxyResolvesModelAliasThroughProviderSettings();
     await testModelProxyReadsConfiguredOpenRouterProvider();
     await testModelProxyFailsOverConfiguredConnectionsOnProviderLimit();
     await testProviderEnvKeyCanFailOverToConfiguredConnectionOnProviderLimit();
     testCommanderRouteHonorsExplicitGptClaudePoolBeforeActiveProviders();
     await testModelProxyDoesNotFailOverInvalidRequestToAnotherConnection();
     await testOutboundProxyEnvAppliesToConfiguredModelFetch();
-    await testModelProxyFallsBackToCurlWhenFetchResets();
+    await testModelProxySurfacesFetchFailureWithoutCurlFallback();
     await testModelProxyDoesNotCurlFallbackAfterTimeout();
     await testModelProxyDoesNotForceAcceptHeaderForNonStreamingChat();
     await testProviderSettingsActionSavesWithoutLeakingKey();
     await testAgentRouteStopsWhenCommanderCannotPlan();
     await testInvalidPlannerEndpointContentStopsRoute();
     await testReviewFinalMarksGoalCompleted();
+    await testLegacySseGoalRunIsDisabled();
     await testCancelInternalRouteStepIsNoop();
     await testPublicCompatibleApiRoutesAreDisabled();
     console.log("agent-route-model-proxy tests passed");

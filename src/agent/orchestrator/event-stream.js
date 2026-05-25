@@ -95,88 +95,164 @@ function summarizeEvent(event, data = {}) {
   };
 }
 
-function streamAgentRouteEvents(run, { observabilityRuntime, request } = {}) {
-  const encoder = new TextEncoder();
-  let closed = false;
-  let heartbeat = null;
-  function stopHeartbeat() {
-    if (heartbeat) clearInterval(heartbeat);
-    heartbeat = null;
+function uiDataPartTypeForEvent(event = "") {
+  const key = String(event || "").toLowerCase();
+  if (key === "start") return "data-agent-run";
+  if (key === "plan") return "data-agent-plan";
+  if (key === "graph") return "data-agent-graph";
+  if (key === "strategy") return "data-agent-strategy";
+  if (key === "memory") return "data-agent-memory";
+  if (key === "budget") return "data-agent-budget";
+  if (key === "risk") return "data-agent-risk";
+  if (key === "verification" || key.startsWith("authenticity")) return "data-agent-verification";
+  if (key === "worker_start" || key === "worker_log" || key === "worker_done") return "data-agent-task";
+  if (
+    key === "correctiveactionsuggested" ||
+    key === "actionranked" ||
+    key === "actionlearningupdated" ||
+    key === "decisionattributed"
+  ) {
+    return "data-agent-action";
   }
-  return new Response(
-    new ReadableStream({
-      async start(controller) {
-        let currentGoalId = "";
-        let finalSummary = null;
-        const write = (text) => {
-          if (closed) return;
-          try {
-            controller.enqueue(encoder.encode(text));
-          } catch {
-            closed = true;
-            stopHeartbeat();
-          }
-        };
-        const send = (event, data = {}) => {
-          if (data && (data.goal_id || data.goalId)) currentGoalId = String(data.goal_id || data.goalId);
-          const enrichedData =
-            currentGoalId && data && !data.goal_id && !data.goalId ? { goal_id: currentGoalId, ...data } : data;
-          const streamData = compactStreamValue(enrichedData);
-          if (event !== "done") {
-            const summary = summarizeEvent(event, streamData);
-            if (summary) finalSummary = summary;
-          }
-          try {
-            if (observabilityRuntime && typeof observabilityRuntime.recordEvent === "function") {
-              observabilityRuntime.recordEvent(event, streamData, {
-                source: "agent-route-sse",
-                goalId: currentGoalId
-              });
-            }
-          } catch (err) {
-            console.warn("[agent-route] failed to record observability event:", err.message);
-          }
-          write(`event: ${event}\ndata: ${JSON.stringify(streamData)}\n\n`);
-        };
-        heartbeat = setInterval(() => write(": agent-route working\n\n"), 4000);
+  if (key === "pause") return "data-agent-pause";
+  if (key === "final") return "data-agent-final";
+  if (key === "error") return "data-agent-error";
+  if (key === "done") return "data-agent-done";
+  return "data-agent-event";
+}
 
-        try {
-          await run(send);
-        } catch (err) {
-          send("error", {
-            message: err && err.message ? err.message : String(err)
-          });
-        } finally {
-          stopHeartbeat();
-          send("done", {
-            at: new Date().toISOString(),
-            ...(finalSummary || {})
-          });
-          closed = true;
-          try {
-            controller.close();
-          } catch {
-            // The browser may have already closed the SSE connection.
-          }
-        }
-      },
-      cancel() {
-        closed = true;
-        stopHeartbeat();
-      }
-    }),
-    {
-      headers: corsHeaders(request, {
-        "Content-Type": "text/event-stream",
-        "Cache-Control": "no-cache",
-        Connection: "keep-alive",
-        "x-agent-route": "agent-auto"
-      })
+function uiDataPartIdForEvent(event = "", data = {}, sequence = 0) {
+  const goalId = data.goal_id || data.goalId || "goal";
+  const taskId = data.task_id || data.taskId || (data.task && data.task.id) || "";
+  const key = String(event || "").toLowerCase();
+  if (taskId) return `${goalId}:task:${taskId}`;
+  if (key === "graph") return `${goalId}:graph`;
+  if (key === "strategy") return `${goalId}:strategy`;
+  if (key === "budget") return `${goalId}:budget`;
+  if (key === "final") return `${goalId}:final`;
+  if (key === "pause") return `${goalId}:pause`;
+  if (key === "done") return `${goalId}:done`;
+  return `${goalId}:${key || "event"}:${sequence}`;
+}
+
+function uiDataPartForEvent(event, data, sequence) {
+  const key = String(event || "").toLowerCase();
+  return {
+    type: uiDataPartTypeForEvent(event),
+    id: uiDataPartIdForEvent(event, data, sequence),
+    data: {
+      event,
+      payload: data
+    },
+    transient: key === "worker_log"
+  };
+}
+
+function finalTextChunks(content = "", maxLength = 24) {
+  const text = String(content || "");
+  const chunks = [];
+  let buffer = "";
+  for (const char of text) {
+    buffer += char;
+    if (buffer.length >= maxLength || /[。！？.!?\n]/.test(char)) {
+      chunks.push(buffer);
+      buffer = "";
     }
-  );
+  }
+  if (buffer) chunks.push(buffer);
+  return chunks;
+}
+
+function wait(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function writeFinalTextPart(writer, data = {}) {
+  const content = String(data.content || data.answerMarkdown || "").trim();
+  if (!content) return;
+  const goalId = data.goal_id || data.goalId || "goal";
+  const id = `${goalId}:final-text`;
+  writer.write({ type: "text-start", id });
+  for (const delta of finalTextChunks(content)) {
+    writer.write({ type: "text-delta", id, delta });
+    await wait(content.length > 3000 ? 4 : 12);
+  }
+  writer.write({ type: "text-end", id });
+}
+
+async function streamAgentRouteUiMessages(run, { observabilityRuntime, request } = {}) {
+  const { createUIMessageStream, createUIMessageStreamResponse } = await import("ai");
+  const stream = createUIMessageStream({
+    async execute({ writer }) {
+      let currentGoalId = "";
+      let finalSummary = null;
+      let sequence = 0;
+      let heartbeat = null;
+      const pendingTextWrites = [];
+      const send = (event, data = {}) => {
+        const internalOnly = String(event || "").toLowerCase() === "langgraph";
+        if (data && (data.goal_id || data.goalId)) currentGoalId = String(data.goal_id || data.goalId);
+        const enrichedData =
+          currentGoalId && data && !data.goal_id && !data.goalId ? { goal_id: currentGoalId, ...data } : data;
+        const streamData = compactStreamValue(enrichedData);
+        if (event !== "done") {
+          const summary = summarizeEvent(event, streamData);
+          if (summary) finalSummary = summary;
+        }
+        try {
+          if (observabilityRuntime && typeof observabilityRuntime.recordEvent === "function") {
+            observabilityRuntime.recordEvent(event, streamData, {
+              source: "agent-route-ui-message",
+              goalId: currentGoalId
+            });
+          }
+        } catch (err) {
+          console.warn("[agent-route] failed to record observability event:", err.message);
+        }
+        if (!internalOnly) {
+          writer.write(uiDataPartForEvent(event, streamData, sequence));
+          sequence += 1;
+          if (event === "final") pendingTextWrites.push(writeFinalTextPart(writer, streamData));
+        }
+      };
+      heartbeat = setInterval(() => {
+        writer.write({
+          type: "data-agent-heartbeat",
+          id: `${currentGoalId || "goal"}:heartbeat:${Date.now()}`,
+          data: { at: new Date().toISOString() },
+          transient: true
+        });
+      }, 4000);
+
+      try {
+        await run(send);
+      } catch (err) {
+        const message = err && err.message ? err.message : String(err);
+        send("error", { message });
+        writer.write({ type: "error", errorText: message });
+      } finally {
+        if (heartbeat) clearInterval(heartbeat);
+        await Promise.all(pendingTextWrites);
+        send("done", {
+          at: new Date().toISOString(),
+          ...(finalSummary || {})
+        });
+      }
+    },
+    onError: (error) => (error && error.message ? error.message : String(error))
+  });
+
+  return createUIMessageStreamResponse({
+    stream,
+    headers: corsHeaders(request, {
+      "Cache-Control": "no-cache",
+      "x-agent-route": "agent-auto",
+      "x-agent-route-stream": "ui-message"
+    })
+  });
 }
 
 module.exports = {
-  streamAgentRouteEvents,
+  streamAgentRouteUiMessages,
   summarizeEvent
 };

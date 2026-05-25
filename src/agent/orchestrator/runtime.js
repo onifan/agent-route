@@ -7,7 +7,6 @@ const dependencyEngine = require("../graph");
 const strategyEngine = require("../strategies");
 const verificationEngine = require("../verification");
 const observabilityRuntime = require("../observability");
-const recoveryRuntime = require("../recovery");
 const actionApi = require("./action-api");
 const codexCliRunner = require("./codex-cli-runner");
 const contentUtils = require("./content-utils");
@@ -15,6 +14,7 @@ const eventStream = require("./event-stream");
 const finalizer = require("./finalizer");
 const goalSetup = require("./goal-setup");
 const initialPlanning = require("./initial-planning");
+const langGraphRunner = require("./langgraph-runner");
 const loopController = require("./loop-controller");
 const modelRoutingService = require("./model-routing-service");
 const planner = require("./planner");
@@ -352,8 +352,76 @@ function nonInternalPlannedTasks(tasks = []) {
       !task.internal &&
       !task.routeInternal &&
       !task.route_internal &&
-      !["plan", "final"].includes(String(task.id || ""))
+      !/^(?:plan|final|goal-review(?:-\d+)?)$/.test(String(task.id || ""))
   );
+}
+
+function unresolvedPlannedTasks(tasks = []) {
+  return nonInternalPlannedTasks(tasks).filter((task) => isActionableUnresolvedTask(task));
+}
+
+function taskAttemptsExhausted(task = {}) {
+  return Number(task.attempts || 0) >= Math.max(1, Number(task.maxAttempts || 1));
+}
+
+function taskHasWorkerObservation(task = {}) {
+  return Boolean(
+    Number(task.attempts || 0) > 0 ||
+    task.startedAt ||
+    task.started_at ||
+    task.finishedAt ||
+    task.finished_at ||
+    task.result ||
+    task.output ||
+    task.error ||
+    task.verificationStatus ||
+    task.verification_status
+  );
+}
+
+function isExhaustedEvidenceGapTask(task = {}) {
+  const status = String(task.status || TASK_STATUS.WAITING).toLowerCase();
+  if (![TASK_STATUS.NEEDS_EVIDENCE, TASK_STATUS.RETRY_READY].includes(status)) return false;
+  return taskAttemptsExhausted(task) && taskHasWorkerObservation(task);
+}
+
+function isActionableUnresolvedTask(task = {}) {
+  const status = String(task.status || TASK_STATUS.WAITING).toLowerCase();
+  if (isTerminalTaskStatus(status)) return false;
+  if (isExhaustedEvidenceGapTask({ ...task, status })) return false;
+  return true;
+}
+
+function compactTaskListForMessage(tasks = [], limit = 5) {
+  return tasks
+    .slice(0, limit)
+    .map(
+      (task) => `${task.id || "unknown"}(${task.status || TASK_STATUS.WAITING}: ${task.title || task.type || "task"})`
+    )
+    .join(", ");
+}
+
+function finalBlockedByUnresolvedPlannedTasks(tasks = []) {
+  const unresolvedTasks = unresolvedPlannedTasks(tasks);
+  if (!unresolvedTasks.length) {
+    return { blocked: false, status: "", task: null, message: "", tasks: [] };
+  }
+  const attentionTask = unresolvedTasks.find((task) => taskRequiresHumanAttention(task));
+  const first = attentionTask || unresolvedTasks[0];
+  const waitingForHuman = Boolean(attentionTask);
+  const visible = compactTaskListForMessage(unresolvedTasks);
+  return {
+    blocked: true,
+    status: waitingForHuman ? TASK_STATUS.WAITING_HUMAN : TASK_STATUS.BLOCKED,
+    task: first,
+    tasks: unresolvedTasks,
+    message: waitingForHuman
+      ? first.approvalReason ||
+        first.blockedReason ||
+        `AgentRoute 还有 ${unresolvedTasks.length} 个已规划任务等待人工确认，不能生成最终答案：${visible}`
+      : `AgentRoute 还有 ${unresolvedTasks.length} 个已规划任务未进入终态，不能生成最终答案：${visible}`,
+    failureReasons: ["planned_tasks_unresolved_before_final"]
+  };
 }
 
 function blockedWhenNoSuccessfulWorkerEvidence(tasks = []) {
@@ -595,12 +663,18 @@ function modelMaxAttempts(config) {
 
 function shouldRetryModelAttempt(attempt) {
   if (!attempt || attempt.ok) return false;
+  const errorText = String(attempt.error || "");
+  if (
+    /internal model request failed|upstream model request failed|fetch failed|econnrefused|enotfound|couldn'?t connect|connection refused/i.test(
+      errorText
+    )
+  )
+    return false;
   const status = Number(attempt.status || 0);
-  const error = String(attempt.error || "");
-  if (!status) return true;
+  if (!status) return false;
   if ([408, 409, 425, 429].includes(status)) return true;
   if (status >= 500) return true;
-  return status === 200 && /invalid|valid|schema|json|empty|did not contain|parse/i.test(error);
+  return false;
 }
 
 function retryMessagesForModelAttempt(messages, error, attemptNumber, maxAttempts, label) {
@@ -1099,7 +1173,7 @@ async function runAgentChat(req, body, nextHandler, endpointMode = "chat") {
         ? { ok: true }
         : {
             ok: false,
-            error: "Planner response did not contain a valid AgentRoute plan protocol object.",
+            error: "Planner response did not contain a valid structured plan object.",
             diagnostics: planner.plannerContentDiagnostics(content)
           };
     }
@@ -1458,8 +1532,8 @@ async function runAgentChat(req, body, nextHandler, endpointMode = "chat") {
   throw new Error(`Final synthesis failed: ${finalAttempt.error || "unknown error"}`);
 }
 
-function streamAgentRouteEvents(run, requestOrOrigin = null) {
-  return eventStream.streamAgentRouteEvents(run, { observabilityRuntime, request: requestOrOrigin });
+function streamAgentRouteUiMessages(run, requestOrOrigin = null) {
+  return eventStream.streamAgentRouteUiMessages(run, { observabilityRuntime, request: requestOrOrigin });
 }
 
 const { taskSummary, isPausedTaskStatus, isTerminalTaskStatus } = taskExecutor;
@@ -1473,8 +1547,9 @@ function finalGoalStatusFromTasks(content = "", tasks = []) {
     if (!task || task.internal || task.routeInternal) return false;
     const status = String(task.status || "").toLowerCase();
     const type = String(task.type || "").toLowerCase();
+    const exhaustedEvidenceGap = isExhaustedEvidenceGapTask(task);
     return (
-      ["failed", "blocked", "waiting_human", "awaiting_confirmation"].includes(status) &&
+      (["failed", "blocked", "waiting_human", "awaiting_confirmation"].includes(status) || exhaustedEvidenceGap) &&
       /^(web_search|web_read|web_fetch|api_read|http_fetch|browser|local_execution)$/.test(type)
     );
   });
@@ -1493,11 +1568,6 @@ function finalGoalStatusFromTasks(content = "", tasks = []) {
 
 async function runAgentRouteEvents(req, body, nextHandler, send) {
   const config = modelRoutingService.applyActiveProviderModels(applyRequestConfig(await resolveConfig(), body));
-  recoveryRuntime.runStartupRecovery({
-    trigger: "agent_route_start",
-    config,
-    skipGoalId: body.goal_id || body.goalId
-  });
   const trace = [];
   const messages = Array.isArray(body.messages) ? body.messages : [];
   const startedAt = Date.now();
@@ -1879,6 +1949,52 @@ async function runAgentRouteEvents(req, body, nextHandler, send) {
     goalStrategy = reviewResult.goalStrategy;
 
     if (reviewResult.finalAnswer) {
+      const finalBlock = finalBlockedByUnresolvedPlannedTasks(allTasks);
+      if (finalBlock.blocked) {
+        const readyUnresolvedTaskIds = new Set(
+          taskRuntime
+            .readyTasks(goalId)
+            .filter((task) => !executedTaskIds.has(task.id))
+            .map((task) => task.id)
+        );
+        const canContinueDraining =
+          iteration < maxGoalIterations && finalBlock.tasks.some((task) => readyUnresolvedTaskIds.has(task.id));
+        trace.push({
+          label: `goal-review:${iteration}:final-blocked`,
+          model: "dependency-engine",
+          ok: false,
+          error: finalBlock.message,
+          unresolvedTasks: finalBlock.tasks.slice(0, 8).map(taskSummary)
+        });
+        send("goal_check", {
+          iteration,
+          ok: false,
+          status: "continue",
+          progress_summary: finalBlock.message,
+          next_count: reviewResult.review.nextTasks.length,
+          commander_model: reviewResult.reviewAttempt.model || commanderRoute.selected,
+          failure_reason: "planned_tasks_unresolved_before_final"
+        });
+        if (reviewResult.review.nextTasks.length) {
+          appendTasks(reviewResult.review.nextTasks, {
+            source: "review",
+            createdByTaskId: `goal-review-${iteration}`,
+            createdByTaskTitle: "Review progress and decide next step"
+          });
+          send("plan", {
+            tasks: allTasks.map(taskSummary),
+            raw: reviewResult.reviewAttempt.content || ""
+          });
+          continue;
+        }
+        if (canContinueDraining) continue;
+        pausedTask = {
+          ...finalBlock.task,
+          status: finalBlock.status,
+          blockedReason: finalBlock.message
+        };
+        break;
+      }
       finalFromReview = reviewResult.finalAnswer;
       break;
     }
@@ -1952,6 +2068,20 @@ async function runAgentRouteEvents(req, body, nextHandler, send) {
     return;
   }
 
+  const finalBlock = finalBlockedByUnresolvedPlannedTasks(allTasks);
+  if (finalBlock.blocked) {
+    taskRuntime.setGoalStatus(goalId, finalBlock.status, { blockedReason: finalBlock.message });
+    send("pause", {
+      goal_id: goalId,
+      status: finalBlock.status,
+      task: finalBlock.task ? taskSummary(finalBlock.task) : undefined,
+      message: finalBlock.message,
+      elapsedMs: Date.now() - startedAt,
+      trace
+    });
+    return;
+  }
+
   const finalResult = await finalizer.runFinalSynthesis({
     req,
     nextHandler,
@@ -1980,6 +2110,65 @@ async function runAgentRouteEvents(req, body, nextHandler, send) {
   taskRuntime.setGoalStatus(goalId, finalStatus.status, { blockedReason: finalStatus.blockedReason });
 }
 
+async function parseAgentRouteRequestBody(req) {
+  try {
+    return { body: await req.clone().json() };
+  } catch (err) {
+    return {
+      response: jsonResponse(
+        {
+          error: {
+            message: "Expected JSON body",
+            type: "invalid_request_error",
+            code: "invalid_json"
+          }
+        },
+        400,
+        {},
+        req
+      )
+    };
+  }
+}
+
+function prepareAgentRouteChatBody(body, req) {
+  const goal = String(body.goal || body.prompt || body.input || "").trim();
+  const messages = Array.isArray(body.messages) ? body.messages : [{ role: "user", content: goal }];
+  const hasUserContent = messages.some((message) => normalizeContent(message && message.content).trim());
+  if (!hasUserContent) {
+    return {
+      response: jsonResponse(
+        {
+          error: {
+            message: "Missing task goal",
+            type: "invalid_request_error",
+            code: "missing_goal"
+          }
+        },
+        400,
+        {},
+        req
+      )
+    };
+  }
+
+  return {
+    chatBody: {
+      ...body,
+      model: "agent-auto",
+      messages,
+      stream: false,
+      agent_route: {
+        ...(body.agent_route || {}),
+        goal_id:
+          body.goal_id || body.goalId || (body.agent_route && (body.agent_route.goal_id || body.agent_route.goalId)),
+        commander_model:
+          body.commander_model || body.commanderModel || (body.agent_route && body.agent_route.commander_model)
+      }
+    }
+  };
+}
+
 async function handleAgentRouteRun(req, nextHandler) {
   if (req.method === "OPTIONS") {
     return preflightResponse(req);
@@ -1988,61 +2177,58 @@ async function handleAgentRouteRun(req, nextHandler) {
   const authDenied = checkRequestAuth(req);
   if (authDenied) return authDenied;
 
-  let body;
-  try {
-    body = await req.clone().json();
-  } catch (err) {
-    return jsonResponse(
-      {
-        error: {
-          message: "Expected JSON body",
-          type: "invalid_request_error",
-          code: "invalid_json"
-        }
-      },
-      400,
-      {},
-      req
-    );
-  }
+  const parsed = await parseAgentRouteRequestBody(req);
+  if (parsed.response) return parsed.response;
+  const body = parsed.body;
 
   if (normalizeAgentRouteAction(body)) {
     return handleAgentRouteAction(body, req);
   }
 
-  const goal = String(body.goal || body.prompt || body.input || "").trim();
-  const messages = Array.isArray(body.messages) ? body.messages : [{ role: "user", content: goal }];
-  const hasUserContent = messages.some((message) => normalizeContent(message && message.content).trim());
-  if (!hasUserContent) {
-    return jsonResponse(
-      {
-        error: {
-          message: "Missing task goal",
-          type: "invalid_request_error",
-          code: "missing_goal"
-        }
-      },
-      400,
-      {},
-      req
-    );
+  return jsonResponse(
+    {
+      error: {
+        message: "The legacy /api/agent-route/run SSE goal stream is disabled. Use /api/agent-route/ui-stream.",
+        type: "gone",
+        code: "agent_route_legacy_sse_disabled"
+      }
+    },
+    410,
+    {},
+    req
+  );
+}
+
+async function handleAgentRouteUiStream(req, nextHandler) {
+  if (req.method === "OPTIONS") {
+    return preflightResponse(req);
   }
 
-  const chatBody = {
-    ...body,
-    model: "agent-auto",
-    messages,
-    stream: false,
-    agent_route: {
-      ...(body.agent_route || {}),
-      goal_id:
-        body.goal_id || body.goalId || (body.agent_route && (body.agent_route.goal_id || body.agent_route.goalId)),
-      commander_model:
-        body.commander_model || body.commanderModel || (body.agent_route && body.agent_route.commander_model)
-    }
-  };
+  const authDenied = checkRequestAuth(req);
+  if (authDenied) return authDenied;
 
-  return streamAgentRouteEvents((send) => runAgentRouteEvents(req, chatBody, nextHandler, send), req);
+  const parsed = await parseAgentRouteRequestBody(req);
+  if (parsed.response) return parsed.response;
+  const body = parsed.body;
+
+  if (normalizeAgentRouteAction(body)) {
+    return handleAgentRouteAction(body, req);
+  }
+
+  const prepared = prepareAgentRouteChatBody(body, req);
+  if (prepared.response) return prepared.response;
+
+  return streamAgentRouteUiMessages(
+    (send) =>
+      langGraphRunner.runAgentRouteLangGraph({
+        req,
+        body: prepared.chatBody,
+        nextHandler,
+        send,
+        runAgentRouteEvents
+      }),
+    req
+  );
 }
 
 module.exports = {
@@ -2054,6 +2240,8 @@ module.exports = {
   DEFAULT_PROMPT_SETTINGS,
   callWithFallback,
   handleAgentRouteRun,
+  handleAgentRouteUiStream,
+  finalBlockedByUnresolvedPlannedTasks,
   finalGoalStatusFromTasks,
   retryMaxTokenLimitForProviderError,
   runAgentChat

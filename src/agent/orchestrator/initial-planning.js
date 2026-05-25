@@ -72,7 +72,7 @@ async function runInitialPlanning({
         ? { ok: true }
         : {
             ok: false,
-            error: "Planner response did not contain a valid AgentRoute plan protocol object.",
+            error: "Planner response did not contain a valid structured plan object.",
             diagnostics: planner.plannerContentDiagnostics(content)
           };
     }

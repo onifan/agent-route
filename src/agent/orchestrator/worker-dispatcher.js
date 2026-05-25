@@ -3,6 +3,7 @@
 const browserWorker = require("./browser-worker");
 const { safeJsonParse } = require("./content-utils");
 const documentWorker = require("./document-worker");
+const mcpClient = require("../mcp/client");
 const protocol = require("./protocol");
 const webToolWorker = require("./web-tool-worker");
 
@@ -25,6 +26,30 @@ function toolRetryDelayMs(config = {}, attempt = 1) {
 function sleep(ms) {
   const delay = Math.max(0, Number(ms || 0));
   return delay ? new Promise((resolve) => setTimeout(resolve, delay)) : Promise.resolve();
+}
+
+function clampMs(value, min, max) {
+  const number = Number(value || 0);
+  if (!Number.isFinite(number) || number <= 0) return min;
+  return Math.max(min, Math.min(number, max));
+}
+
+function workerMcpTimeoutMs(config = {}, runningTask = {}) {
+  const taskBudgetMs = Number(config.budget?.task?.maxRuntimeMs || 0);
+  const callTimeoutMs = Number(config.callTimeoutMs || 0);
+  const codexTimeoutMs =
+    runningTask.modelPool === "codex-cli" || runningTask.type === "local_execution"
+      ? Number(config.codexCliTimeoutMs || 0)
+      : 0;
+  const explicitMs = Number(config.workerMcpTimeoutMs || config.mcpWorkerTimeoutMs || 0);
+  const baseline = Math.max(explicitMs, taskBudgetMs, callTimeoutMs, codexTimeoutMs, 60000);
+  return clampMs(baseline + 15000, 60000, 60 * 60 * 1000);
+}
+
+async function runMcpWorker({ toolName, args, handlers, config, runningTask }) {
+  return mcpClient.callWorkerTool(toolName, args, handlers, {
+    timeout: workerMcpTimeoutMs(config, runningTask)
+  });
 }
 
 function parsedToolStatus(result = {}) {
@@ -150,7 +175,17 @@ async function dispatchWorker({
       trace,
       send,
       taskSummary,
-      execute: () => documentWorker.runDocumentWorker(runningTask, config, workerResults)
+      execute: () =>
+        runMcpWorker({
+          toolName: mcpClient.WORKER_MCP_TOOLS.document,
+          args: {
+            task: runningTask,
+            config,
+            previousResults: workerResults
+          },
+          config,
+          runningTask
+        })
     });
   }
 
@@ -163,7 +198,17 @@ async function dispatchWorker({
       trace,
       send,
       taskSummary,
-      execute: () => webToolWorker.runWebToolWorker(runningTask, config, messages)
+      execute: () =>
+        runMcpWorker({
+          toolName: mcpClient.WORKER_MCP_TOOLS.web,
+          args: {
+            task: runningTask,
+            config,
+            messages
+          },
+          config,
+          runningTask
+        })
     });
   }
 
@@ -176,29 +221,47 @@ async function dispatchWorker({
       trace,
       send,
       taskSummary,
-      execute: () => browserWorker.runBrowserWorker(runningTask, config)
+      execute: () =>
+        runMcpWorker({
+          toolName: mcpClient.WORKER_MCP_TOOLS.browser,
+          args: {
+            task: runningTask,
+            config
+          },
+          config,
+          runningTask
+        })
     });
   }
 
   if (runningTask.modelPool === "codex-cli") {
-    const result = await runCodexCliTask(
-      messages,
-      runningTask,
-      config,
-      workerResults,
-      (log) => {
-        if (!shouldForwardCodexLog(log)) return;
-        const text = String((log && log.text) || "").trim();
-        if (!text) return;
-        send("worker_log", {
-          task: taskSummary(runningTask),
-          model: "codex-cli",
-          stream: log.stream || "stdout",
-          text: text.slice(-1200)
-        });
+    const onCodexLog = (log) => {
+      if (typeof shouldForwardCodexLog === "function" && !shouldForwardCodexLog(log)) return;
+      const text = String((log && log.text) || "").trim();
+      if (!text) return;
+      send("worker_log", {
+        task: taskSummary(runningTask),
+        model: "codex-cli",
+        stream: log.stream || "stdout",
+        text: text.slice(-1200)
+      });
+    };
+    const result = await runMcpWorker({
+      toolName: mcpClient.WORKER_MCP_TOOLS.codex,
+      args: {
+        messages,
+        task: runningTask,
+        config,
+        previousResults: workerResults,
+        workerMemory
       },
-      workerMemory
-    );
+      handlers: {
+        runCodexCliTask,
+        onCodexLog
+      },
+      config,
+      runningTask
+    });
     trace.push({
       label: `worker:${runningTask.id}`,
       model: "codex-cli",

@@ -839,7 +839,10 @@ function recoverPlannerAttempt(attempt, messages, config, trace, reason = "") {
   return attempt;
 }
 
-function makePlanPrompt(messages, config, memoryText = "", strategy = null) {
+function makePlanPrompt(messages, config, memoryText = "", strategy = null, options = {}) {
+  const normalizePromptSettings =
+    (options && options.normalizePromptSettings) || ((value) => (value && typeof value === "object" ? value : {}));
+  const prompts = normalizePromptSettings(config && config.promptSettings);
   const needsLocalExecution = shouldUseCodexCliWorker(messages);
   const needsWebTool = shouldUseWebToolWorker(messages);
   const needsDocumentTool = shouldUseDocumentWorker(messages);
@@ -848,8 +851,10 @@ function makePlanPrompt(messages, config, memoryText = "", strategy = null) {
     {
       role: "system",
       content: [
+        compactPromptBlock(prompts.commanderSystem || "", 900),
         "[角色]\nAgentRoute planner。",
         "[任务]\n根据用户目标规划下一批可执行任务，计划不是执行结果。",
+        compactPromptBlock(prompts.plannerInstructions || "", 1800),
         protocol.baseContract(protocol.KIND.PLAN),
         runtimeTemporalContext(),
         `planner 输出描述的是待执行任务，不是已完成动作；最多 ${maxTasks} 个任务，字段短，input 用短查询/URL，不写整段需求。`,

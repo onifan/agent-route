@@ -1,12 +1,6 @@
 "use strict";
 
-const COMMANDER_MODEL_OPTIONS = [
-  { id: "cx/gpt-5.2-codex", name: "GPT-5.2 Codex" },
-  { id: "cx/gpt-5.2", name: "GPT-5.2" },
-  { id: "cx/gpt-5.1-codex-max", name: "GPT-5.1 Codex Max" },
-  { id: "cx/gpt-5.1-codex", name: "GPT-5.1 Codex" },
-  { id: "cx/gpt-5.1", name: "GPT-5.1" }
-];
+const COMMANDER_MODEL_OPTIONS = [{ id: "gpt5.5", name: "gpt5.5" }];
 
 const DEFAULT_COMMANDER_MODELS = COMMANDER_MODEL_OPTIONS.map((model) => model.id);
 
