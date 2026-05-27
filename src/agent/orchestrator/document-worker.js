@@ -22,7 +22,9 @@ function hasDocumentOutputIntent(value = "") {
   const outputVerb = /生成|创建|输出|保存|导出|写成|制作|渲染|create|generate|write|save|export|render|produce/.test(
     text
   );
-  const documentNoun = /文档|报告文件|文档文件|产物|artifact|document|pdf|docx|word|markdown|html|txt|text/.test(text);
+  const documentNoun =
+    /文档|报告文件|文档文件|产物/.test(text) ||
+    /\b(?:artifact|document|pdf|docx|word|markdown|html|txt|text)\b/.test(text);
   return outputVerb && documentNoun;
 }
 

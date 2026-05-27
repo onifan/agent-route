@@ -52,7 +52,7 @@ function evaluateListAuthenticity(state, task = {}, workerResult = {}) {
     return null;
   if (!outputLooksLikeList(task, workerResult.output || "")) return null;
   const items = extractListItems(output);
-  const expected = expectedCount(`${taskText(task)} ${output}`);
+  const expected = expectedCount(taskText(task));
   const result = createScore(0.82);
 
   if (expected && items.length < expected)

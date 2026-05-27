@@ -54,16 +54,15 @@ function normalizeCodexCliResult(raw = {}) {
     timedOut || raw.error || raw.blocked || raw.signal || (Number.isFinite(Number(code)) && Number(code) !== 0);
   const content = String(raw.content || (!failed ? [stdout.trim(), stderr.trim()].filter(Boolean)[0] : "") || "");
   const error = summarizeCodexFailure(raw);
+  const generatedFailureContent = timedOut
+    ? "Codex CLI timed out before finishing."
+    : Number.isFinite(Number(code))
+      ? `Codex CLI exited with code ${code}.`
+      : "";
   return {
     ok: Boolean(raw.ok) || (Number(code) === 0 && !timedOut && !raw.error),
     action: "codex_cli_exec",
-    content:
-      content ||
-      (timedOut
-        ? "Codex CLI timed out before finishing."
-        : Number.isFinite(Number(code))
-          ? `Codex CLI exited with code ${code}.`
-          : ""),
+    content: content || (failed && error ? error : generatedFailureContent),
     stdout,
     stderr,
     code: Number.isFinite(Number(code)) ? Number(code) : null,

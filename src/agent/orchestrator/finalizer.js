@@ -59,6 +59,7 @@ async function runFinalSynthesis({
   taskSummary,
   callWithFallback,
   startedAt,
+  classifyFinalStatus,
   normalizePromptSettings
 }) {
   const finalModels = needsLocalExecution ? commanderRoute.models.slice(0, 1) : commanderRoute.models;
@@ -150,8 +151,17 @@ async function runFinalSynthesis({
       sourceModel
     };
   }
+  const finalStatus =
+    typeof classifyFinalStatus === "function"
+      ? classifyFinalStatus(content, allTasks)
+      : { status: "completed", blockedReason: "" };
   send("final", {
     content,
+    status: finalStatus.status,
+    finalStatus: finalStatus.status,
+    final_status: finalStatus.status,
+    blockedReason: finalStatus.blockedReason,
+    failureReason: finalStatus.blockedReason,
     source_model: sourceModel,
     commander_model: commanderRoute.selected,
     elapsedMs: Date.now() - startedAt,
@@ -160,6 +170,7 @@ async function runFinalSynthesis({
   return {
     content,
     finalAttempt,
+    finalStatus,
     sourceModel
   };
 }

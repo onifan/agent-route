@@ -98,6 +98,37 @@ async function runReviewIteration({
   });
   emitBudget(`after_review:${iteration}`, reviewAttempt.budgetEvaluation || null, reviewTask);
 
+  if (!reviewAttempt.ok) {
+    const review = {
+      status: "failed",
+      progressSummary: reviewAttempt.error || "Commander review failed.",
+      finalAnswer: "",
+      strategyRevisionReason: "",
+      nextTasks: []
+    };
+    send("goal_check", {
+      iteration,
+      ok: false,
+      status: review.status,
+      progress_summary: review.progressSummary,
+      next_count: 0,
+      commander_model: reviewAttempt.model || commanderRoute.selected
+    });
+    return {
+      explicitRevisionReason: "",
+      finalAnswer: "",
+      goalStrategy,
+      review,
+      reviewAttempt,
+      reviewTask,
+      shouldContinue: false,
+      strategyChanged: false,
+      strategyRevision: { shouldRevise: false, reasons: [], revisionReason: "" },
+      failed: true,
+      error: review.progressSummary
+    };
+  }
+
   const parsedReviewResult = reviewAttempt.ok
     ? protocol.parseProtocolContent(reviewAttempt.content, protocol.KIND.GOAL_REVIEW, (value) =>
         value.status === "done" || value.status === "continue"

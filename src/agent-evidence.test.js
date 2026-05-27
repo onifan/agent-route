@@ -350,6 +350,106 @@ function testReadOnlyFileEvidenceDoesNotRequireOutputContentMatch() {
   assert.ok(result.reasons.some((reason) => /Read-only file evidence recorded/i.test(reason)));
 }
 
+function testReadOnlyFileEvidenceIgnoresPlaceholderBeforeSize() {
+  const filePath = path.join(testRoot, "README.md");
+  fs.writeFileSync(filePath, "# AgentRoute\n\nRead-only project notes.\n");
+  const size = fs.statSync(filePath).size;
+  const result = verificationEngine.verifyTaskResult(
+    {
+      id: "repo-inventory",
+      type: "local_execution",
+      modelPool: "codex-cli",
+      title: "只读盘点 README.md 和 package.json",
+      prompt: "只读读取 README.md，不要修改任何文件。",
+      successCriteria: ["返回关键文件清单和标准化文件元数据"]
+    },
+    {
+      status: "success",
+      output: "Read README.md and summarized project metadata without changing files.",
+      actions: ["read README.md"],
+      evidence: {
+        provided: true,
+        files: [
+          {
+            path: filePath,
+            beforeSize: 0,
+            afterSize: size,
+            role: "read",
+            expectedContent: "summary text that is not expected to exist in README.md",
+            expectedContentRequired: false
+          }
+        ],
+        shell: { command: "sed -n '1,20p' README.md", exitCode: 0, stderr: "", stdout: "# AgentRoute" },
+        semantic: {
+          outputSummary: "The README file was read as evidence.",
+          addressesCriteria: true,
+          criteriaCoverage: 1,
+          qualityScore: 0.92
+        }
+      }
+    },
+    { cwd: testRoot }
+  );
+  assert.equal(
+    result.detectedIssues.some((issue) => /Expected content was not found/i.test(issue.issue)),
+    false
+  );
+  assert.equal(
+    result.reasons.some((reason) => /Verified file size changed/i.test(reason)),
+    false
+  );
+  assert.ok(result.reasons.some((reason) => /Read-only file evidence recorded/i.test(reason)));
+}
+
+function testPartialReadOnlyLocalEvidenceCanCompleteWithIssueRecorded() {
+  const filePath = path.join(testRoot, "project-readme.md");
+  fs.writeFileSync(filePath, "AgentRoute Studio read-only evidence\n");
+  const result = verificationEngine.verifyTaskResult(
+    {
+      type: "local_execution",
+      modelPool: "codex-cli",
+      toolWorker: "browser",
+      title: "Read-only inspect local project",
+      prompt:
+        "Only run read-only pwd, ls, find, sed, head, grep and wc commands. Do not write, install, delete or modify.",
+      successCriteria: ["return read-only command evidence", "return project summary evidence"]
+    },
+    {
+      status: "success",
+      output:
+        "Read-only inspection collected project structure, package metadata, source excerpts and command evidence.",
+      actions: ["pwd", "ls", "sed -n"],
+      evidence: {
+        shell: { command: "pwd && ls && sed -n '1,40p' project-readme.md", exitCode: 0, stdout: "ok", stderr: "" },
+        files: [
+          {
+            path: filePath,
+            role: "read",
+            exists: true,
+            size: fs.statSync(filePath).size,
+            expectedContent: "AgentRoute Studio",
+            expectedContentRequired: false
+          }
+        ],
+        semantic: {
+          outputSummary: "Read-only inspection collected enough project evidence.",
+          addressesCriteria: true,
+          criteriaCoverage: 0.9,
+          qualityScore: 0.9,
+          qualityIssues: [
+            "One exploratory read command had a correctable missing-path note, but later evidence corrected it."
+          ]
+        }
+      }
+    },
+    { cwd: testRoot, attempts: 1, maxAttempts: 1 }
+  );
+  assert.equal(result.verificationStatus, verificationEngine.VERIFICATION_STATUS.PARTIALLY_VERIFIED);
+  assert.equal(result.suggestedNextState, verificationEngine.SUGGESTED_NEXT_STATE.COMPLETED);
+  assert.ok(result.detectedIssues.some((issue) => /correctable missing-path/i.test(issue.issue)));
+  assert.equal(result.missingEvidence[0].kind, "shell_execution");
+}
+
 function testRiskReadsDetectedActionTypeWithoutStateMutation() {
   const browser = evidence.normalizeBrowserEvidence({
     detectedActionType: "submit_like_click",
@@ -406,6 +506,8 @@ async function main() {
   testVerificationStillFlagsRealLoginGate();
   testFileExpectedContentObjectUsesJsonSubsetVerification();
   testReadOnlyFileEvidenceDoesNotRequireOutputContentMatch();
+  testReadOnlyFileEvidenceIgnoresPlaceholderBeforeSize();
+  testPartialReadOnlyLocalEvidenceCanCompleteWithIssueRecorded();
   testRiskReadsDetectedActionTypeWithoutStateMutation();
   testObservabilityExposesSanitizedEvidence();
   console.log("agent evidence tests passed");

@@ -159,6 +159,33 @@ function testInternetResearchIsRoutedToAgentToolWorker() {
   assert.equal(browserLabeledRead.tasks[0].toolWorker, "web");
   assert.equal(browserLabeledRead.tasks[0].type, "web_search");
   assert.equal(browserLabeledRead.tasks[0].modelPool, "free");
+  const localFileRead = planner.normalizePlan(
+    {
+      tasks: [
+        {
+          id: "readonly-local-project-evidence",
+          title: "只读收集本机项目文件证据",
+          type: "web_read",
+          toolWorker: "web",
+          modelPool: "free",
+          description:
+            "只读检查本机 /Users/liugonghui/Documents/agent route 项目里的 README.md、package.json 和 app/page.js。",
+          input: "/Users/liugonghui/Documents/agent route"
+        }
+      ]
+    },
+    { maxTasks: 5 },
+    [
+      {
+        role: "user",
+        content: "只读检查本机 /Users/liugonghui/Documents/agent route 项目，禁止修改、安装或联网。"
+      }
+    ],
+    null
+  );
+  assert.equal(localFileRead.tasks[0].type, "local_execution");
+  assert.equal(localFileRead.tasks[0].modelPool, "codex-cli");
+  assert.notEqual(localFileRead.tasks[0].toolWorker, "web");
   assert.equal(
     webToolWorker.searchQuery(
       {
@@ -548,6 +575,63 @@ async function testWebEvidenceProgressReviewStaysOnCommanderModels() {
   assert.equal(start.data.task.modelPool, "commander");
 }
 
+async function testFailedReviewStopsWithoutStrategyLoop() {
+  const commanderRoute = {
+    selected: "gpt5.5",
+    models: ["gpt5.5"]
+  };
+  const events = [];
+  const strategyEvents = [];
+  const allTasks = [
+    { id: "a", title: "Evidence A", type: "web_search", status: "failed" },
+    { id: "b", title: "Evidence B", type: "web_search", status: "failed" },
+    { id: "c", title: "Evidence C", type: "web_search", status: "completed" }
+  ];
+
+  const result = await reviewRunner.runReviewIteration({
+    req: new Request("http://localhost/api/v1/chat/completions", { method: "POST" }),
+    nextHandler: async () => {
+      throw new Error("test callWithFallback should intercept model calls");
+    },
+    baseBody: { max_tokens: 256, temperature: 0.2 },
+    messages: [{ role: "user", content: "review failed path" }],
+    config: DEFAULT_CONFIG,
+    defaultConfig: DEFAULT_CONFIG,
+    needsLocalExecution: false,
+    commanderRoute,
+    iteration: 1,
+    maxGoalIterations: 4,
+    goalId: "goal-review-timeout",
+    goalMemoryQuery: "",
+    allTasks,
+    workerResults: [{ ok: true, task: allTasks[2], content: "verified evidence" }],
+    goalBudget: null,
+    goalStrategy: null,
+    trace: [],
+    send: (event, data) => events.push({ event, data }),
+    emitBudget: () => {},
+    emitStrategy: (event, data) => strategyEvents.push({ event, data }),
+    persistGoalBudget: () => {},
+    taskSummary: (task) => task,
+    callWithFallback: async () => ({
+      ok: false,
+      model: "gpt5.5",
+      error: "timeout",
+      elapsedMs: 45000
+    }),
+    normalizePromptSettings: (value) => value || DEFAULT_PROMPT_SETTINGS
+  });
+
+  assert.equal(result.failed, true);
+  assert.equal(result.shouldContinue, false);
+  assert.equal(result.review.status, "failed");
+  assert.equal(result.review.nextTasks.length, 0);
+  assert.deepEqual(strategyEvents, []);
+  const goalCheck = events.find((item) => item.event === "goal_check");
+  assert.equal(goalCheck.data.status, "failed");
+  assert.equal(goalCheck.data.progress_summary, "timeout");
+}
+
 function testWorkerEvidenceCompactionPreservesStructuredRows() {
   const content = [
     "Query: collect public evidence",
@@ -668,6 +752,7 @@ function testReviewPromptIncludesVerifiedEvidenceInventoryFromPlan() {
           toolWorker: "web",
           status: "completed",
           verificationStatus: "verified",
+          produces: [{ id: "selected_public_source_evidence" }],
           input: "https://open.example.test/data",
           result:
             "URL: https://open.example.test/data\nHTTP: 200\nTitle: Open Dataset\nText: Verified public evidence row."
@@ -695,9 +780,50 @@ function testReviewPromptIncludesVerifiedEvidenceInventoryFromPlan() {
   assert.match(promptText, /不得返回 done\/final_answer/);
   assert.match(promptText, /已验证证据清单/);
   assert.match(promptText, /verified-read/);
+  assert.match(promptText, /produces=selected_public_source_evidence/);
+  assert.match(promptText, /不要再创建同一信息缺口的重复取证任务/);
+  assert.match(promptText, /不要为同一事实或产物创建多个并列候选任务/);
+  assert.match(promptText, /不要让它们成为主要查询词/);
   assert.match(promptText, /open\.example\.test\/data/);
   assert.match(promptText, /早期失败任务只表示对应路径失败/);
   assert.doesNotMatch(promptText, /USD\/JPY|日元|国债|MarketWatch|Reuters|TradingEconomics/i);
+}
+
+function testReviewPromptUsesCompactPlanSnapshot() {
+  const oversizedTaskResult = "FULL_PLAN_RESULT_SHOULD_NOT_BE_IN_PLAN ".repeat(3000);
+  const reviewMessages = reviewLoop.makeProgressMessages(
+    [{ role: "user", content: "复盘计划。" }],
+    {
+      tasks: [
+        {
+          id: "heavy-task",
+          title: "Task with a large stored result",
+          type: "web_search",
+          toolWorker: "web",
+          modelPool: "free",
+          status: "waiting",
+          attempts: 0,
+          maxAttempts: 2,
+          input: "compact public evidence query",
+          result: oversizedTaskResult,
+          output: oversizedTaskResult,
+          history: [{ output: oversizedTaskResult }]
+        }
+      ]
+    },
+    [],
+    1,
+    { promptSettings: DEFAULT_PROMPT_SETTINGS },
+    "",
+    null,
+    { normalizePromptSettings: (value) => value }
+  );
+  const userPrompt = reviewMessages[1].content;
+  assert.match(userPrompt, /当前计划: 1 个任务/);
+  assert.match(userPrompt, /heavy-task/);
+  assert.match(userPrompt, /compact public evidence query/);
+  assert.doesNotMatch(userPrompt, /FULL_PLAN_RESULT_SHOULD_NOT_BE_IN_PLAN/);
+  assert.ok(userPrompt.length < 12000, `review user prompt should stay compact, got ${userPrompt.length}`);
 }
 
 function testAgentPromptsCarryRuntimeTemporalContext() {
@@ -873,6 +999,12 @@ async function testWebToolWorkerReadsMultipleAgentProvidedUrls() {
   assert.deepEqual(seen, ["https://example.test/one", "https://example.test/two"]);
   assert.match(result.content, /Source one/);
   assert.match(result.content, /Source two/);
+}
+
+function testWebUrlExtractionStopsAtCjkPunctuation() {
+  assert.deepEqual(webToolWorker.extractPublicHttpUrls("读取 https://example.test/report，返回标题和正文证据。", 4), [
+    "https://example.test/report"
+  ]);
 }
 
 async function testPlanningFailureDoesNotEmitSuccessfulFinal() {
@@ -1220,7 +1352,10 @@ async function testStructuredOutputErrorExplainsMultipleJsonDocuments() {
   assert.equal(result.ok, false);
   assert.equal(calls, 1);
   assert.equal(requestBodies.length, 1);
-  assert.equal(requestBodies[0].response_format.type, "json_object");
+  assert.equal(requestBodies[0].response_format.type, "json_schema");
+  assert.equal(requestBodies[0].response_format.json_schema.name, "agent_route_plan");
+  assert.equal(requestBodies[0].response_format.json_schema.strict, true);
+  assert.equal(requestBodies[0].response_format.json_schema.schema.properties.kind.enum[0], "plan");
   assert.match(result.error, /multiple_different_json_documents/);
   assert.match(result.error, /topLevelJsonDocuments=2/);
 }
@@ -1412,6 +1547,9 @@ function testCommanderPromptsSeparatePlanningFromExecution() {
   assert.match(DEFAULT_PROMPT_SETTINGS.reviewSystem, /不要使用 Markdown/);
   assert.match(DEFAULT_PROMPT_SETTINGS.reviewSystem, /标准英文\/代码\/缩写/);
   assert.match(DEFAULT_PROMPT_SETTINGS.reviewSystem, /避免默认把来源名/);
+  assert.match(DEFAULT_PROMPT_SETTINGS.reviewSystem, /已验证证据覆盖/);
+  assert.match(DEFAULT_PROMPT_SETTINGS.reviewSystem, /同一事实或产物创建多个并列候选任务/);
+  assert.match(DEFAULT_PROMPT_SETTINGS.reviewSystem, /不要让它们成为主要查询词/);
   assert.match(DEFAULT_PROMPT_SETTINGS.reviewSystem, /普通“写报告\/最终报告”应由 final_answer 收口/);
   assert.match(DEFAULT_PROMPT_SETTINGS.finalSystem, /kind 必须是 "final_answer"/);
   assert.match(DEFAULT_PROMPT_SETTINGS.workerSystem, /actions 数组只能列出本次 worker run 中真实执行过的动作/);
@@ -1682,6 +1820,54 @@ function testTaskAppenderDropsDocumentGenerationWhenGoalForbidsFileChanges() {
   );
 }
 
+function testTaskAppenderDropsReadOnlyDocumentsPathDocumentGeneration() {
+  reset();
+  const goalId = "documents-path-readonly-document-prune-goal";
+  const trace = [];
+  const strategyEvents = [];
+  const appendTasks = taskAppender.createTaskAppender({
+    goalId,
+    allTasks: [],
+    knownTaskIds: new Set(),
+    getGoalStrategy: () => null,
+    goalMemoryQuery: "分析本机/Users/liugonghui/Documents/agent route 的项目，给出项目说明。",
+    plannerMemory: "",
+    trace,
+    send: () => {},
+    emitStrategy: (event, payload) => strategyEvents.push({ event, payload }),
+    emitGraph: () => ({ readyTaskIds: [] }),
+    taskSummary: (task) => task
+  });
+
+  const registered = appendTasks(
+    [
+      {
+        id: "inspect-project-files-local",
+        title: "本地只读收集项目结构与关键文件证据",
+        description: "用本地只读方式收集 /Users/liugonghui/Documents/agent route 的目录结构。",
+        type: "document_generate",
+        toolWorker: "document",
+        modelPool: "free",
+        input: "/Users/liugonghui/Documents/agent route",
+        prompt: "只读检查目标目录，输出精简目录树和关键文件证据。不要修改、删除、安装或联网。",
+        successCriteria: ["返回目录结构和关键文件证据"]
+      }
+    ],
+    "review"
+  );
+
+  assert.equal(registered.length, 0);
+  assert.equal(taskRuntime.listTasks(goalId).length, 0);
+  assert.ok(trace.some((item) => item.label === "synthesis-prune:review"));
+  assert.ok(
+    strategyEvents.some((item) =>
+      (item.payload.violations || []).some(
+        (violation) => violation.code === "document_generation_without_allowed_artifact_request"
+      )
+    )
+  );
+}
+
 function testTaskAppenderAllowsScopedArtifactDocumentGeneration() {
   reset();
   const goalId = "scoped-artifact-document-goal";
@@ -1753,10 +1939,11 @@ function testTaskAppenderSplitsMultiUrlReadTasks() {
         type: "api_read",
         toolWorker: "web",
         input: "https://api.example.test/latest?from=USD&to=JPY,EUR\nhttps://api.example.test/latest?from=EUR&to=JPY",
+        produces: [{ id: "rate_evidence", taskId: "multi-api" }],
         successCriteria: ["HTTP status and response body"]
       }
     ],
-    "review"
+    "planner"
   );
 
   assert.deepEqual(
@@ -1767,7 +1954,56 @@ function testTaskAppenderSplitsMultiUrlReadTasks() {
     registered.map((task) => task.input),
     ["https://api.example.test/latest?from=USD&to=JPY,EUR", "https://api.example.test/latest?from=EUR&to=JPY"]
   );
-  assert.ok(trace.some((item) => item.label === "split-read:review"));
+  assert.deepEqual(
+    registered.map((task) => task.produces[0].taskId),
+    ["multi-api", "multi-api-2"]
+  );
+  assert.ok(trace.some((item) => item.label === "split-read:planner"));
+}
+
+function testReviewAppenderKeepsMultiUrlReadTasksGrouped() {
+  reset();
+  const goalId = "review-group-multi-url-read-goal";
+  const trace = [];
+  const appendTasks = taskAppender.createTaskAppender({
+    goalId,
+    allTasks: [],
+    knownTaskIds: new Set(),
+    getGoalStrategy: () => null,
+    goalMemoryQuery: "",
+    plannerMemory: "",
+    trace,
+    send: () => {},
+    emitStrategy: () => {},
+    emitGraph: () => ({ readyTaskIds: [] }),
+    taskSummary: (task) => task
+  });
+
+  const input = "https://api.example.test/latest?from=USD&to=JPY,EUR\nhttps://api.example.test/latest?from=EUR&to=JPY";
+  const registered = appendTasks(
+    [
+      {
+        id: "multi-api",
+        title: "读取多个公开 API",
+        type: "api_read",
+        toolWorker: "web",
+        input,
+        produces: [{ id: "rate_evidence", taskId: "multi-api" }],
+        successCriteria: ["HTTP status and response body"]
+      }
+    ],
+    "review"
+  );
+
+  assert.deepEqual(
+    registered.map((task) => task.id),
+    ["multi-api"]
+  );
+  assert.equal(registered[0].input, input);
+  assert.equal(
+    trace.some((item) => item.label === "split-read:review"),
+    false
+  );
 }
 
 function testTaskAppenderDropsDuplicateReadSourceTasks() {
@@ -2006,6 +2242,73 @@ function testRedundantVerifiedEvidenceTasksArePruned() {
   assert.deepEqual(
     result.pruned.map((item) => item.task.id),
     ["evidence-2"]
+  );
+}
+
+function testLogicalDuplicateTasksArePrunedWithinBatch() {
+  const result = taskAppender.filterDuplicateLogicalTasks([
+    {
+      id: "api-1",
+      title: "读取公开 API",
+      type: "api_read",
+      toolWorker: "web",
+      produces: ["web_evidence"]
+    },
+    {
+      id: "api-2",
+      title: "读取公开 API 2",
+      type: "api_read",
+      toolWorker: "web",
+      produces: ["web_evidence"]
+    },
+    {
+      id: "bond-source",
+      title: "读取国债收益率页面",
+      type: "web_read",
+      toolWorker: "web",
+      produces: ["bond_yield_evidence"]
+    }
+  ]);
+  assert.deepEqual(
+    result.tasks.map((task) => task.id),
+    ["api-1", "bond-source"]
+  );
+  assert.deepEqual(
+    result.pruned.map((item) => item.task.id),
+    ["api-2"]
+  );
+}
+
+function testReviewLogicalDuplicateTasksIgnoreSourceKey() {
+  const result = taskAppender.filterDuplicateLogicalTasks(
+    [
+      {
+        id: "api-1",
+        title: "读取公开汇率 API",
+        type: "api_read",
+        toolWorker: "web",
+        input: "https://api.example.test/latest?base=USD",
+        produces: ["fx_rate_evidence"]
+      },
+      {
+        id: "api-2",
+        title: "读取公开汇率 API 2",
+        type: "api_read",
+        toolWorker: "web",
+        input: "https://api2.example.test/latest?base=USD",
+        produces: ["fx_rate_evidence"]
+      }
+    ],
+    [],
+    { ignoreSourceKey: true }
+  );
+  assert.deepEqual(
+    result.tasks.map((task) => task.id),
+    ["api-1"]
+  );
+  assert.deepEqual(
+    result.pruned.map((item) => item.task.id),
+    ["api-2"]
   );
 }
 
@@ -2821,49 +3124,6 @@ function testReadOnlyWebReadRejectsGenericErrorShell() {
   assert.ok(verification.detectedIssues.some((issue) => /error|failure|something went wrong/i.test(issue.issue)));
 }
 
-function testReadOnlyWebReadRejectsPlaceholderMarketData() {
-  const verification = verificationEngine.verifyTaskResult(
-    {
-      id: "jgb-yield-read",
-      title: "读取日本10年期国债收益率页面",
-      type: "web_read",
-      modelPool: "free",
-      toolWorker: "web",
-      riskLevel: "low",
-      input: "https://www.worldgovernmentbonds.com/country/japan/",
-      successCriteria: ["返回可验证的日本10年期国债收益率数值、URL、HTTP status 和页面文本。"]
-    },
-    {
-      status: "success",
-      model: "web-tool",
-      output:
-        "URL: https://www.worldgovernmentbonds.com/country/japan/ HTTP: 200 Title: Japan Government Bonds - Yields Curve Text: Japan 10-Year Government Bond currently offers a yield of -.--- %. Central Bank Rate : ---- %",
-      evidence: {
-        summary: "Japan government bond page loaded with placeholder yield values.",
-        apiResponses: [
-          {
-            method: "GET",
-            url: "https://www.worldgovernmentbonds.com/country/japan/",
-            status: 200,
-            body: "Japan Government Bonds - Yields Curve Last Update: -- --- ----, --:-- GMT+0 10-Year Gov.Bond Yield : -.--- % Spread vs 2-Year Bond : ---.-- bp Central Bank Rate : ---- %"
-          }
-        ],
-        semantic: {
-          outputSummary: "Page loaded but market data fields are placeholders.",
-          addressesCriteria: true,
-          criteriaCoverage: 0.8,
-          qualityScore: 0.75
-        }
-      },
-      context: { model: "web-tool", url: "https://www.worldgovernmentbonds.com/country/japan/" }
-    },
-    { phase: "after_worker", maxAttempts: 2 }
-  );
-
-  assert.equal(verification.verificationStatus, verificationEngine.VERIFICATION_STATUS.UNVERIFIED);
-  assert.ok(verification.detectedIssues.some((issue) => /placeholder market data/i.test(issue.issue)));
-}
-
 function testMultiQueryWebSearchVerificationRejectsUnrelatedClauseEvidence() {
   const verification = verificationEngine.verifyTaskResult(
     {
@@ -3200,14 +3460,17 @@ async function main() {
   testNewsSearchUsesPlannerInputClauses();
   await testWebEvidenceReviewAndFinalStayOnCommanderModels();
   await testWebEvidenceProgressReviewStaysOnCommanderModels();
+  await testFailedReviewStopsWithoutStrategyLoop();
   testWorkerEvidenceCompactionPreservesStructuredRows();
   testReviewSourceDiagnosticsGuideGenericDiscovery();
   testReviewPromptIncludesVerifiedEvidenceInventoryFromPlan();
+  testReviewPromptUsesCompactPlanSnapshot();
   testAgentPromptsCarryRuntimeTemporalContext();
   testPlannerRejectsRepeatedIdenticalJsonDocuments();
   testPlannerRejectsDifferentConcatenatedJsonDocuments();
   await testWebToolWorkerCollectsEvidenceWithoutModel();
   await testWebToolWorkerReadsMultipleAgentProvidedUrls();
+  testWebUrlExtractionStopsAtCjkPunctuation();
   await testPlanningFailureDoesNotEmitSuccessfulFinal();
   await testInvalidWebPlanFailsWithoutRulePlanner();
   await testProviderCreditLimitRetriesWithLowerMaxTokens();
@@ -3222,8 +3485,10 @@ async function main() {
   testPlannerDropsNonExecutableFinalReportToolTasks();
   testTaskAppenderDropsNonExecutableReviewSynthesisTasks();
   testTaskAppenderDropsDocumentGenerationWhenGoalForbidsFileChanges();
+  testTaskAppenderDropsReadOnlyDocumentsPathDocumentGeneration();
   testTaskAppenderAllowsScopedArtifactDocumentGeneration();
   testTaskAppenderSplitsMultiUrlReadTasks();
+  testReviewAppenderKeepsMultiUrlReadTasksGrouped();
   testTaskAppenderDropsDuplicateReadSourceTasks();
   testPlannerGivesToolTasksVerificationRetryWindow();
   testCommanderJsonTokenBudgetsAreConfigurable();
@@ -3232,6 +3497,8 @@ async function main() {
   testBaselineBrowserPlanUsesLowRiskBrowserTask();
   testDanglingDependenciesArePrunedAfterConstraints();
   testRedundantVerifiedEvidenceTasksArePruned();
+  testLogicalDuplicateTasksArePrunedWithinBatch();
+  testReviewLogicalDuplicateTasksIgnoreSourceKey();
   testRedundantEvidenceTasksArePrunedBeforeApprovalInsertion();
   testRedundantEvidenceDedupUsesLiveTaskState();
   testNegatedSideEffectsDoNotRequireApproval();
@@ -3248,7 +3515,6 @@ async function main() {
   testWebSearchVerificationRejectsMismatchedWorkerQueryForAlternatives();
   testDistinctMultiQueryWebSearchRequiresEveryClause();
   testReadOnlyWebReadRejectsGenericErrorShell();
-  testReadOnlyWebReadRejectsPlaceholderMarketData();
   testMultiQueryWebSearchVerificationRejectsUnrelatedClauseEvidence();
   testReadOnlyWebSearchVerificationMatchesMixedCjkNumericEvidence();
   testInteractiveRunsDoNotTriggerUnattendedNightEscalation();

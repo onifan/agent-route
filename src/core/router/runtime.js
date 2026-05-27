@@ -1020,6 +1020,11 @@ async function handleModelProxy(req, options = {}) {
       if (authorization && !headers.Authorization) headers.Authorization = authorization;
     }
     const controller = new AbortController();
+    const abortFromRequest = () => controller.abort(req.signal && req.signal.reason);
+    if (req.signal) {
+      if (req.signal.aborted) controller.abort(req.signal.reason);
+      else req.signal.addEventListener("abort", abortFromRequest, { once: true });
+    }
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
       const upstream = await fetch(
@@ -1101,6 +1106,7 @@ async function handleModelProxy(req, options = {}) {
       );
     } finally {
       clearTimeout(timer);
+      if (req.signal) req.signal.removeEventListener("abort", abortFromRequest);
     }
   }
   return allProviderConnectionsFailedResponse(body && body.model, attempts, 502, req, internalOptions);

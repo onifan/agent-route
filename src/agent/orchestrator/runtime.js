@@ -120,6 +120,11 @@ function cloneHeaders(headers) {
 
 function requestWithBody(req, body, timeoutMs) {
   const controller = new AbortController();
+  const abortFromRequest = () => controller.abort(req.signal && req.signal.reason);
+  if (req.signal) {
+    if (req.signal.aborted) controller.abort(req.signal.reason);
+    else req.signal.addEventListener("abort", abortFromRequest, { once: true });
+  }
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   const request = new Request(req.url, {
     method: "POST",
@@ -127,7 +132,13 @@ function requestWithBody(req, body, timeoutMs) {
     body: JSON.stringify(body),
     signal: controller.signal
   });
-  return { request, timer };
+  return {
+    request,
+    timer,
+    cleanup: () => {
+      if (req.signal) req.signal.removeEventListener("abort", abortFromRequest);
+    }
+  };
 }
 
 function messagesToText(messages) {
@@ -661,9 +672,16 @@ function modelMaxAttempts(config) {
   return Math.max(1, Math.min(10, Math.floor(Number((config && config.modelMaxAttempts) || 3))));
 }
 
+function isModelTimeoutError(errorText = "") {
+  return /timeout|timed out|model_proxy_timeout/i.test(String(errorText || ""));
+}
+
 function shouldRetryModelAttempt(attempt) {
   if (!attempt || attempt.ok) return false;
+  if (attempt.requestAborted) return false;
   const errorText = String(attempt.error || "");
+  if (/aborted|operation was aborted|request_aborted/i.test(errorText)) return false;
+  if (isModelTimeoutError(errorText)) return true;
   if (
     /internal model request failed|upstream model request failed|fetch failed|econnrefused|enotfound|couldn'?t connect|connection refused/i.test(
       errorText
@@ -761,7 +779,7 @@ async function callWithFallback({
         : Number(config.callTimeoutMs || DEFAULT_CONFIG.callTimeoutMs);
 
     const executeRequest = async (body, messagesForUsage, traceOptions = {}) => {
-      const { request, timer } = requestWithBody(req, body, timeoutMs);
+      const { request, timer, cleanup } = requestWithBody(req, body, timeoutMs);
       const started = Date.now();
       const eventLabel = traceOptions.label || label || "model";
       const maxTokens = responseMaxTokenLimit(body, endpointMode) || undefined;
@@ -878,18 +896,24 @@ async function callWithFallback({
           maxTokens,
           budget: budgetEvaluation ? budgetGovernor.compactEvaluation(budgetEvaluation) : undefined
         });
-        emitModelEvent("model_failure", {
+        emitModelEvent(isModelTimeoutError(error) ? "model_timeout" : "model_failure", {
           model,
           status: response.status,
           error: safeModelError(error),
           elapsedMs,
+          timeoutMs: isModelTimeoutError(error) ? timeoutMs : undefined,
           retry: traceOptions.retry,
           maxTokens,
           label: eventLabel
         });
         return { ok: false, error, status: response.status, elapsedMs, budgetEvaluation };
       } catch (err) {
-        const error = err && err.name === "AbortError" ? "timeout" : (err && err.message) || String(err);
+        const requestAborted = Boolean(req && req.signal && req.signal.aborted);
+        const error = requestAborted
+          ? "request_aborted"
+          : err && err.name === "AbortError"
+            ? "timeout"
+            : (err && err.message) || String(err);
         const elapsedMs = Date.now() - started;
         const budgetEvaluation = budgetState
           ? budgetGovernor.recordGoalUsage(
@@ -924,10 +948,11 @@ async function callWithFallback({
           maxTokens,
           label: eventLabel
         });
-        return { ok: false, error, elapsedMs, budgetEvaluation };
+        return { ok: false, error, elapsedMs, budgetEvaluation, requestAborted };
       } finally {
         clearTimeout(hardTimer);
         clearTimeout(timer);
+        cleanup();
       }
     };
 
@@ -936,7 +961,9 @@ async function callWithFallback({
     while (callsUsed < maxModelAttempts) {
       callsUsed += 1;
       const modelAttempt = callsUsed;
-      const requestBaseBody = responseFormatKind ? protocol.jsonModeRequestBody(baseBody, endpointMode) : baseBody;
+      const requestBaseBody = responseFormatKind
+        ? protocol.jsonModeRequestBody(baseBody, endpointMode, responseFormatKind)
+        : baseBody;
       const body = modelRequestBody(requestBaseBody, model, currentMessages, endpointMode);
       const attempt = await executeRequest(body, currentMessages, {
         modelAttempt,
@@ -961,7 +988,9 @@ async function callWithFallback({
         const retryMessages = tokenRetryMessages(scopedMessages, retryLimit, label);
         const retryBaseBody = withResponseMaxTokenLimit(baseBody, endpointMode, retryLimit);
         const retryBody = modelRequestBody(
-          responseFormatKind ? protocol.jsonModeRequestBody(retryBaseBody, endpointMode) : retryBaseBody,
+          responseFormatKind
+            ? protocol.jsonModeRequestBody(retryBaseBody, endpointMode, responseFormatKind)
+            : retryBaseBody,
           model,
           retryMessages,
           endpointMode
@@ -1067,7 +1096,9 @@ async function runCodexCliWorker(messages, config, memoryText = "") {
         model: "codex-cli",
         ok: result.ok,
         elapsedMs: Date.now() - started,
-        error: result.ok ? undefined : String(result.content || result.stderr || "Codex CLI failed").slice(0, 240)
+        error: result.ok
+          ? undefined
+          : String(result.error || result.content || result.stderr || "Codex CLI failed").slice(0, 240)
       }
     ]
   };
@@ -1102,7 +1133,7 @@ async function runCodexCliTask(originalMessages, task, config, previousResults, 
     model: "codex-cli",
     content: result.content,
     evidence,
-    error: result.ok ? "" : String(result.content || result.stderr || "Codex CLI failed"),
+    error: result.ok ? "" : String(result.error || result.content || result.stderr || "Codex CLI failed"),
     elapsedMs: Date.now() - started,
     stdout: result.stdout || "",
     stderr: result.stderr || "",
@@ -1948,6 +1979,20 @@ async function runAgentRouteEvents(req, body, nextHandler, send) {
     });
     goalStrategy = reviewResult.goalStrategy;
 
+    if (reviewResult.failed) {
+      const message = `Commander review failed: ${reviewResult.error || reviewResult.reviewAttempt.error || "unknown error"}`;
+      taskRuntime.setGoalStatus(goalId, TASK_STATUS.FAILED, { blockedReason: message });
+      send("error", {
+        message,
+        phase: "review",
+        model: reviewResult.reviewAttempt.model || commanderRoute.selected,
+        task: reviewResult.reviewTask ? taskSummary(reviewResult.reviewTask) : undefined,
+        elapsedMs: Date.now() - startedAt,
+        trace
+      });
+      return;
+    }
+
     if (reviewResult.finalAnswer) {
       const finalBlock = finalBlockedByUnresolvedPlannedTasks(allTasks);
       if (finalBlock.blocked) {
@@ -2045,6 +2090,11 @@ async function runAgentRouteEvents(req, body, nextHandler, send) {
     const finalStatus = finalGoalStatusFromTasks(finalFromReview, allTasks);
     send("final", {
       content: finalFromReview,
+      status: finalStatus.status,
+      finalStatus: finalStatus.status,
+      final_status: finalStatus.status,
+      blockedReason: finalStatus.blockedReason,
+      failureReason: finalStatus.blockedReason,
       source_model: commanderRoute.selected,
       commander_model: commanderRoute.selected,
       elapsedMs: Date.now() - startedAt,
@@ -2104,6 +2154,7 @@ async function runAgentRouteEvents(req, body, nextHandler, send) {
     taskSummary,
     callWithFallback,
     startedAt,
+    classifyFinalStatus: finalGoalStatusFromTasks,
     normalizePromptSettings
   });
   const finalStatus = finalGoalStatusFromTasks(finalResult.content, allTasks);

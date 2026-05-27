@@ -3,6 +3,7 @@
 import { useChat } from "@ai-sdk/react";
 import { DefaultChatTransport } from "ai";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import MarkdownOutput from "../markdown-output";
 
 const AGENT_ROUTE_UI_STREAM_API = "/api/agent-route/ui-stream";
 
@@ -53,6 +54,8 @@ const INTERNAL_EVENT_TYPES = new Set([
   "budget",
   "correctiveactionsuggested",
   "decisionattributed",
+  "error",
+  "final",
   "graph",
   "memory",
   "message",
@@ -63,6 +66,7 @@ const INTERNAL_EVENT_TYPES = new Set([
   "model_success",
   "model_timeout",
   "plan",
+  "pause",
   "risk",
   "start",
   "strategy",
@@ -122,13 +126,23 @@ function latestUserText(messages = []) {
 }
 
 function latestAssistantText(messages = []) {
+  const message = latestAssistantMessage(messages);
+  return message ? messageText(message).trim() : "";
+}
+
+function messageKey(message = {}) {
+  if (!message || typeof message !== "object") return "";
+  return String(message.id || message.responseId || messageText(message) || "").trim();
+}
+
+function latestAssistantMessage(messages = []) {
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     if (messages[index].role === "assistant") {
       const text = messageText(messages[index]).trim();
-      if (text) return text;
+      if (text) return messages[index];
     }
   }
-  return "";
+  return null;
 }
 
 function partToAgentEvent(part = {}) {
@@ -179,6 +193,7 @@ function toolName(payload = {}) {
     payload.toolWorker ||
     task.toolWorker ||
     task.tool_worker ||
+    (task.modelPool === "commander" ? "commander" : "") ||
     payload.tool ||
     payload.model ||
     (task.modelPool === "codex-cli" ? "codex-cli" : "") ||
@@ -196,6 +211,15 @@ function eventLabel(type = "", payload = {}) {
   const raw = String(type || "").toLowerCase();
   const task = payload.task || {};
   const tool = toolName(payload);
+  const failureText = compactText(
+    payload.error ||
+      payload.reason ||
+      payload.message ||
+      payload.diagnostics?.reason ||
+      payload.diagnostics?.error ||
+      "",
+    180
+  );
   if (raw === "worker_start") return `正在调用 ${tool}...`;
   if (raw === "worker_log") return compactText(payload.text || payload.message || `${tool} 输出日志`, 220);
   if (raw === "worker_done") {
@@ -205,10 +229,11 @@ function eventLabel(type = "", payload = {}) {
   if (raw === "tool_retry") return `重新调用 ${tool}：${compactText(payload.reason || payload.error || "", 180)}`;
   if (raw === "model_attempt") return `正在调用模型 ${payload.model || "unknown"}...`;
   if (raw === "model_success") return `模型 ${payload.model || "unknown"} 返回成功`;
-  if (raw === "model_failure") return `模型 ${payload.model || "unknown"} 返回失败`;
-  if (raw === "model_timeout") return `模型 ${payload.model || "unknown"} 超时`;
+  if (raw === "model_failure")
+    return `模型 ${payload.model || "unknown"} 返回失败${failureText ? `：${failureText}` : ""}`;
+  if (raw === "model_timeout") return `模型 ${payload.model || "unknown"} 超时${failureText ? `：${failureText}` : ""}`;
   if (raw === "model_retry" || raw === "model_failover") {
-    return `模型重试：${payload.fromModel || payload.model || "unknown"}${payload.toModel ? ` -> ${payload.toModel}` : ""}`;
+    return `模型重试：${payload.fromModel || payload.model || "unknown"}${payload.toModel ? ` -> ${payload.toModel}` : ""}${failureText ? `：${failureText}` : ""}`;
   }
   if (raw === "start") return `Agent 启动：${payload.commander_model || "自动路由"}`;
   if (raw === "plan") return `生成任务计划：${array(payload.tasks).length} 个任务`;
@@ -216,8 +241,16 @@ function eventLabel(type = "", payload = {}) {
   if (raw === "strategy") return `更新策略${payload.event ? `：${payload.event}` : ""}`;
   if (raw === "risk") return `风险检查：${taskTitle(task)}`;
   if (raw === "budget") return `预算检查：${displayStatus(payload.evaluation?.status || payload.status)}`;
+  if (raw === "authenticitychecked")
+    return `真实性检查：${displayStatus(payload.verification?.verificationStatus || task.verificationStatus || "completed")}`;
+  if (raw === "authenticitywarning") return "真实性检查：发现风险信号";
+  if (raw === "authenticityblocked") return "真实性检查：已阻止";
   if (raw === "verification")
     return `验证结果：${displayStatus(payload.verification?.verificationStatus || task.verificationStatus)}`;
+  if (raw === "correctiveactionsuggested") return "建议动作已生成";
+  if (raw === "actionranked") return "建议动作已排序";
+  if (raw === "actionlearningupdated") return "行为经验已更新";
+  if (raw === "decisionattributed") return "决策来源已记录";
   if (raw === "memory") return `写入记忆：${Number(payload.count || array(payload.memories).length || 0)} 条`;
   if (raw === "final") return "最终回答已生成";
   if (raw === "error") return compactText(payload.message || payload.error || "Agent 执行失败", 240);
@@ -333,6 +366,8 @@ function artifactReferences(workerResult = {}) {
 function referencesFromEvent(type = "", payload = {}) {
   if (String(type || "").toLowerCase() !== "worker_done") return [];
   const task = payload.task || {};
+  const verification = String(task.verificationStatus || task.verification_status || "").toLowerCase();
+  if (!["verified", "partially_verified"].includes(verification)) return [];
   const workerResult = payload.worker_result || payload.workerResult || {};
   const evidence = workerResult.evidence || {};
   const refs = [
@@ -390,9 +425,14 @@ function roundStatusFromEvent(type = "", payload = {}, currentStatus = "running"
   const status = String(payload.status || payload.finalStatus || payload.final_status || "").toLowerCase();
   if (raw === "error") return "failed";
   if (raw === "pause") return status || "blocked";
-  if (raw === "final") return "completed";
+  if (raw === "final") return status || "completed";
   if (raw === "done" && status) return status;
   return currentStatus;
+}
+
+function isRoundAwaitingProcess(round = {}) {
+  if (String(round.answer || "").trim()) return false;
+  return ["queued", "pending", "running", "waiting"].includes(String(round.status || "").toLowerCase());
 }
 
 function createRound({ id, text }) {
@@ -408,9 +448,23 @@ function createRound({ id, text }) {
   };
 }
 
+function storedRound(goal = {}) {
+  const round = createRound({
+    id: goal.id || goal.goalId || goal.goal_id || uid("goal"),
+    text: goal.goal || goal.title || "AgentRoute 运行"
+  });
+  return {
+    ...round,
+    answer: String(goal.output || ""),
+    status: String(goal.status || round.status),
+    startedAt: goal.createdAt || goal.created_at || round.startedAt,
+    updatedAt: goal.updatedAt || goal.updated_at || round.updatedAt
+  };
+}
+
 function transportBody({ id, messages, body }) {
-  const agentMessages = toAgentMessages(messages);
   const goal = latestUserText(messages) || body?.goal || body?.prompt || body?.input || "";
+  const agentMessages = goal ? [{ role: "user", content: goal }] : toAgentMessages(messages);
   return {
     ...(body || {}),
     goal,
@@ -531,10 +585,14 @@ function RoundView({ round, active }) {
                 <ProcessLine event={event} key={event.id} />
               ))}
             </ol>
-          ) : (
+          ) : isRoundAwaitingProcess(round) ? (
             <p className="agent-empty-process">等待 Agent 返回内部过程...</p>
-          )}
-          {finalText ? <div className="agent-answer-text">{finalText}</div> : null}
+          ) : null}
+          {finalText ? (
+            <div className="agent-answer-text">
+              <MarkdownOutput className="markdown-output" content={finalText} />
+            </div>
+          ) : null}
           <References references={round.references} />
           <IterationSteps events={round.events} />
         </div>
@@ -557,13 +615,16 @@ export default function AgentRouteChatPanel({
   modelPools = null,
   promptSettings = null,
   budgetSettings = null,
+  historyGoals = [],
   onRoundStart = null,
+  onRoundStop = null,
   onAgentEvent = null
 }) {
   const [input, setInput] = useState("");
   const [rounds, setRounds] = useState([]);
   const inputRef = useRef(null);
   const currentRoundRef = useRef("");
+  const assistantMessageKeysAtSubmitRef = useRef(new Set());
   const streamRef = useRef(null);
   const transport = useMemo(
     () =>
@@ -576,14 +637,17 @@ export default function AgentRouteChatPanel({
     []
   );
 
-  const updateRoundFromEvent = useCallback((roundId, type, payload = {}) => {
+  const updateRoundFromEvent = useCallback((roundId, type, payload = {}, partId = "") => {
+    const label = eventLabel(type, payload);
+    const detail = payload.task ? taskTitle(payload.task) : "";
     const event = {
       id: uid("event"),
+      partId,
       type,
       payload,
-      label: eventLabel(type, payload),
+      label,
       tone: eventTone(type, payload),
-      detail: payload.task ? taskTitle(payload.task) : "",
+      detail: detail && detail !== label ? detail : "",
       iteration: eventIteration(type, payload),
       at: new Date().toISOString()
     };
@@ -591,13 +655,17 @@ export default function AgentRouteChatPanel({
       const index = current.findIndex((round) => round.id === roundId);
       const fallbackRound = createRound({ id: roundId, text: payload.goal || "AgentRoute 运行" });
       const round = index >= 0 ? current[index] : fallbackRound;
+      const existingEventIndex = partId ? round.events.findIndex((item) => item.partId === partId) : -1;
       const references = mergeReferences(round.references, referencesFromEvent(type, payload));
       const next = {
         ...round,
         references,
         status: roundStatusFromEvent(type, payload, round.status),
         updatedAt: event.at,
-        events: [...round.events, event].slice(-300)
+        events:
+          existingEventIndex >= 0
+            ? round.events.map((item, itemIndex) => (itemIndex === existingEventIndex ? event : item))
+            : [...round.events, event].slice(-300)
       };
       if (index < 0) return [...current, next];
       return current.map((item, itemIndex) => (itemIndex === index ? next : item));
@@ -629,7 +697,7 @@ export default function AgentRouteChatPanel({
       if (!event) return;
       const roundId = event.payload.goal_id || event.payload.goalId || currentRoundRef.current;
       if (!roundId) return;
-      updateRoundFromEvent(roundId, event.type, event.payload);
+      updateRoundFromEvent(roundId, event.type, event.payload, event.partId);
       if (typeof onAgentEvent === "function") onAgentEvent(roundId, event.type, event.payload);
     },
     onError(error) {
@@ -643,7 +711,40 @@ export default function AgentRouteChatPanel({
   });
 
   const busy = chat.status === "submitted" || chat.status === "streaming";
+  const latestAssistant = latestAssistantMessage(chat.messages);
   const latestAnswer = latestAssistantText(chat.messages);
+
+  useEffect(() => {
+    const restored = array(historyGoals).slice().reverse().map(storedRound);
+    if (!restored.length) return;
+    setRounds((current) => {
+      const existingById = new Map(current.map((round) => [round.id, round]));
+      let changed = restored.length !== current.length;
+      const next = restored.map((round) => {
+        const existing = existingById.get(round.id);
+        if (!existing) {
+          changed = true;
+          return round;
+        }
+        const isActiveStream = existing.id === currentRoundRef.current && busy;
+        const answer = existing.answer || round.answer;
+        const status = isActiveStream ? existing.status : round.status;
+        const updatedAt = isActiveStream ? existing.updatedAt : round.updatedAt;
+        if (answer !== existing.answer || status !== existing.status || updatedAt !== existing.updatedAt) {
+          changed = true;
+          return { ...existing, answer, status, updatedAt };
+        }
+        return existing;
+      });
+      for (const existing of current) {
+        if (!restored.some((round) => round.id === existing.id)) {
+          changed = true;
+          next.push(existing);
+        }
+      }
+      return changed ? next : current;
+    });
+  }, [historyGoals, busy]);
 
   useEffect(() => {
     const node = streamRef.current;
@@ -652,13 +753,19 @@ export default function AgentRouteChatPanel({
   }, [rounds, chat.messages.length]);
 
   useEffect(() => {
+    const key = messageKey(latestAssistant);
+    if (!key || assistantMessageKeysAtSubmitRef.current.has(key)) return;
     updateRoundAnswer(currentRoundRef.current, latestAnswer);
-  }, [latestAnswer, updateRoundAnswer]);
+  }, [latestAnswer, latestAssistant, updateRoundAnswer]);
 
   async function submit(event) {
     event.preventDefault();
     const text = String(inputRef.current?.value || input || "").trim();
     if (!text || busy) return;
+    assistantMessageKeysAtSubmitRef.current = new Set(
+      chat.messages.filter((message) => message.role === "assistant").map(messageKey)
+    );
+    chat.setMessages([]);
     const roundId = uid("goal");
     currentRoundRef.current = roundId;
     setRounds((current) => [...current, createRound({ id: roundId, text })]);
@@ -691,6 +798,25 @@ export default function AgentRouteChatPanel({
     chat.setMessages([]);
   }
 
+  function stopChat() {
+    if (!busy) return;
+    chat.stop();
+    const roundId = currentRoundRef.current;
+    if (!roundId) return;
+    if (typeof onRoundStop === "function") onRoundStop({ id: roundId });
+    setRounds((current) =>
+      current.map((round) =>
+        round.id === roundId
+          ? {
+              ...round,
+              status: "stopped",
+              updatedAt: new Date().toISOString()
+            }
+          : round
+      )
+    );
+  }
+
   return (
     <section className="agent-chat-shell">
       <section className="agent-chat-stream" ref={streamRef} aria-live="polite">
@@ -709,31 +835,29 @@ export default function AgentRouteChatPanel({
           <Icon name="delete_sweep" />
         </button>
         <textarea
+          id="agentChatInput"
           aria-label="输入目标"
           ref={inputRef}
           value={input}
           onChange={(event) => setInput(event.target.value)}
           onKeyDown={(event) => {
-            if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) submit(event);
+            if (event.key === "Enter" && !event.shiftKey) {
+              event.preventDefault();
+              event.currentTarget.form?.requestSubmit();
+            }
           }}
           placeholder="输入一个目标..."
           rows={1}
         />
-        <button
-          className="agent-chat-icon-button"
-          type="button"
-          onClick={() => chat.stop()}
-          title="停止生成"
-          disabled={!busy}
-        >
+        <button className="agent-chat-icon-button" type="button" onClick={stopChat} title="停止生成" disabled={!busy}>
           <Icon name="stop_circle" />
         </button>
         <button
           className="agent-chat-send"
-          type="button"
+          type="submit"
           title={busy ? "正在生成" : input.trim() ? "发送" : "输入内容后发送"}
           aria-disabled={busy}
-          onClick={submit}
+          disabled={busy}
         >
           <Icon name={busy ? "hourglass_top" : "send"} />
         </button>

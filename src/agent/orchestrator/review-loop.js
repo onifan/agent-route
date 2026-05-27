@@ -189,6 +189,25 @@ function listValues(value = []) {
     .filter(Boolean);
 }
 
+function artifactIds(value = []) {
+  const raw = Array.isArray(value) ? value : String(value || "").split(/[\s,]+/);
+  const ids = [];
+  const seen = new Set();
+  for (const item of raw || []) {
+    const id =
+      typeof item === "string"
+        ? item
+        : item && typeof item === "object"
+          ? item.id || item.type || item.path || item.name || ""
+          : "";
+    const text = String(id || "").trim();
+    if (!text || seen.has(text)) continue;
+    seen.add(text);
+    ids.push(text);
+  }
+  return ids;
+}
+
 function taskAttemptsExhausted(task = {}) {
   return Number(task.attempts || 0) >= Math.max(1, Number(task.maxAttempts || 1));
 }
@@ -223,7 +242,10 @@ function isActionableUnresolvedTask(task = {}) {
 
 function taskInventoryLine(task = {}) {
   const dependsOn = listValues(task.dependsOn || task.depends_on || task.dependencies || []);
-  const consumes = listValues(task.consumes || task.requiredArtifacts || task.required_artifacts || []);
+  const consumes = artifactIds(task.consumes || task.requiredArtifacts || task.required_artifacts || []);
+  const produces = artifactIds(
+    task.produces || task.outputs || task.producedArtifacts || task.produced_artifacts || []
+  );
   const missing = listValues(task.missingArtifacts || task.missing_artifacts || []);
   return [
     `- ${task.id}: ${compactText(task.title || "", 120)}`,
@@ -233,6 +255,7 @@ function taskInventoryLine(task = {}) {
     task.toolWorker ? `toolWorker=${task.toolWorker}` : "",
     dependsOn.length ? `dependsOn=${dependsOn.join(",")}` : "",
     consumes.length ? `consumes=${consumes.join(",")}` : "",
+    produces.length ? `produces=${produces.join(",")}` : "",
     missing.length ? `missing=${missing.join(",")}` : "",
     task.blockedReason ? `blockedReason=${compactText(task.blockedReason, 180)}` : "",
     task.error ? `error=${compactText(task.error, 180)}` : "",
@@ -240,6 +263,70 @@ function taskInventoryLine(task = {}) {
   ]
     .filter(Boolean)
     .join(" | ");
+}
+
+function reviewPlanLine(task = {}) {
+  const dependsOn = listValues(task.dependsOn || task.depends_on || task.dependencies || []);
+  const consumes = artifactIds(task.consumes || task.requiredArtifacts || task.required_artifacts || []);
+  const produces = artifactIds(
+    task.produces || task.outputs || task.producedArtifacts || task.produced_artifacts || []
+  );
+  const criteria = compactList(task.successCriteria || task.success_criteria || [], 3);
+  const missing = compactList(
+    Array.isArray(task.missingEvidence)
+      ? task.missingEvidence.map((item) => item.description || item.reason || item.kind || item.id)
+      : [],
+    3
+  );
+  return [
+    `- ${task.id}: ${compactText(task.title || task.description || "", 120)}`,
+    `status=${task.status || "waiting"}`,
+    `attempts=${Number(task.attempts || 0)}/${Math.max(1, Number(task.maxAttempts || 1))}`,
+    `type=${task.type || "general"}`,
+    `modelPool=${task.modelPool || "free"}`,
+    task.toolWorker ? `toolWorker=${task.toolWorker}` : "",
+    task.riskLevel ? `risk=${task.riskLevel}` : "",
+    task.verificationStatus ? `verification=${task.verificationStatus}` : "",
+    task.verificationReasonCode ? `verificationReason=${task.verificationReasonCode}` : "",
+    dependsOn.length ? `dependsOn=${dependsOn.join(",")}` : "",
+    consumes.length ? `consumes=${consumes.join(",")}` : "",
+    produces.length ? `produces=${produces.join(",")}` : "",
+    criteria.length ? `criteria=${criteria.join("; ")}` : "",
+    missing.length ? `missingEvidence=${missing.join("; ")}` : "",
+    task.error ? `error=${compactText(task.error, 220)}` : "",
+    task.blockedReason ? `blockedReason=${compactText(task.blockedReason, 220)}` : "",
+    task.routingReason ? `routing=${compactText(task.routingReason, 180)}` : "",
+    task.input ? `input=${compactText(task.input, 260)}` : ""
+  ]
+    .filter(Boolean)
+    .join(" | ");
+}
+
+function compactPlanForReview(plan = {}, limit = 12) {
+  const tasks = Array.isArray(plan && plan.tasks) ? plan.tasks : [];
+  if (!tasks.length) return "当前计划: 无任务。";
+  return [
+    `当前计划: ${tasks.length} 个任务。`,
+    ...tasks.slice(0, limit).map(reviewPlanLine),
+    tasks.length > limit ? `... 其余 ${tasks.length - limit} 个任务已省略。` : ""
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
+function compactStrategyForReview(strategy = null) {
+  if (!strategy || typeof strategy !== "object") return "";
+  const snapshot = {
+    id: strategy.id || strategy.strategyId || "",
+    status: strategy.status || "",
+    phase: strategy.phase || strategy.strategicPhase || "",
+    objective: compactText(strategy.objective || strategy.strategicObjective || strategy.goal || "", 260),
+    revisionReason: compactText(strategy.revisionReason || strategy.revision_reason || "", 260),
+    priorities: compactList(strategy.priorities || [], 5),
+    constraints: compactList(strategy.constraints || [], 5),
+    stopConditions: compactList(strategy.stopConditions || strategy.stop_conditions || [], 5)
+  };
+  return ["当前 strategy:", JSON.stringify(snapshot)].join("\n");
 }
 
 function unresolvedTaskInventory(planTasks = [], limit = 12) {
@@ -292,11 +379,15 @@ function verifiedEvidenceInventory(planTasks = [], results = [], limit = 10) {
     const content = [entry.content, task.result, task.output].filter(Boolean).join("\n");
     const urls = extractUrls([task.input, task.prompt, content].filter(Boolean).join("\n")).slice(0, 3);
     const evidence = compactWorkerEvidence(content, 650);
+    const produces = artifactIds(
+      task.produces || task.outputs || task.producedArtifacts || task.produced_artifacts || []
+    );
     return [
       `- ${task.id}: ${compactText(task.title || "", 120)}`,
       `type=${task.type || "general"}`,
       task.toolWorker ? `toolWorker=${task.toolWorker}` : "",
       task.verificationStatus ? `verification=${task.verificationStatus}` : "",
+      produces.length ? `produces=${produces.join(",")}` : "",
       urls.length ? `urls=${urls.join(", ")}` : "",
       evidence ? `evidence=${compactText(evidence, 520)}` : ""
     ]
@@ -306,8 +397,33 @@ function verifiedEvidenceInventory(planTasks = [], results = [], limit = 10) {
   return [
     "已验证证据清单:",
     ...lines,
-    "review 判断是否已足够时，应先使用这些已验证证据；早期失败任务只表示对应路径失败，不会自动否定后续已验证替代证据。"
+    "review 判断是否已足够时，应先使用这些已验证证据；早期失败任务只表示对应路径失败，不会自动否定后续已验证替代证据。已验证证据已经覆盖的事实或产物，不要再创建同一信息缺口的重复取证任务。"
   ].join("\n");
+}
+
+function compactWorkerResultsForReview(planTasks = [], results = [], limit = 8) {
+  const latestByTaskId = new Map();
+  const anonymous = [];
+  for (const result of results || []) {
+    const taskId = String((result && result.task && result.task.id) || "").trim();
+    if (!taskId) {
+      anonymous.push(result);
+      continue;
+    }
+    latestByTaskId.set(taskId, result);
+  }
+  const taskOrder = new Map();
+  (planTasks || []).forEach((task, index) => {
+    if (task && task.id) taskOrder.set(String(task.id), index);
+  });
+  const ordered = [...latestByTaskId.values()].sort((left, right) => {
+    const leftIndex = taskOrder.has(String(left?.task?.id || "")) ? taskOrder.get(String(left.task.id)) : 9999;
+    const rightIndex = taskOrder.has(String(right?.task?.id || "")) ? taskOrder.get(String(right.task.id)) : 9999;
+    return leftIndex - rightIndex;
+  });
+  const selected = [...ordered, ...anonymous].slice(-Math.max(1, Number(limit || 8)));
+  if (!selected.length) return "无。";
+  return selected.map((result) => compactWorkerResult(result, 900)).join("\n\n");
 }
 
 function makeProgressMessages(
@@ -322,7 +438,9 @@ function makeProgressMessages(
 ) {
   const normalizePromptSettings = options.normalizePromptSettings || ((value) => value || {});
   const prompts = normalizePromptSettings(config && config.promptSettings);
-  const strategyText = strategy ? strategyEngine.strategyForPrompt(strategy) : "";
+  const strategyText = strategy ? compactText(strategyEngine.strategyForPrompt(strategy), 1800) : "";
+  const boundedMemoryText = memoryText ? compactText(memoryText, 1800) : "";
+  const planTasks = (plan && plan.tasks) || [];
   return [
     {
       role: "system",
@@ -333,13 +451,17 @@ function makeProgressMessages(
         protocol.baseContract(protocol.KIND.GOAL_REVIEW),
         "next_tasks 最多 3 个；字段保持短句，避免长段落导致结构化输出被截断。",
         strategyText,
-        memoryText,
+        boundedMemoryText,
         "modelPool 只能从 commander、strong、coding、free、codex-cli 中选择。",
         "每个 next task 都要自行判断 difficulty：low、medium、high 或 critical。",
         "每个 next task 都要自行判断 riskLevel：low、medium、high 或 critical。",
+        "每个 next_task 必须对应一个仍未覆盖的独立事实、产物或执行缺口；如果“已验证证据清单”已经覆盖同一事实或产物，不要重复取证。若你认为覆盖不足，必须在 progress_summary 写明未覆盖的字段、口径、时效或冲突来源。",
+        "同一轮 next_tasks 不要为同一事实或产物创建多个并列候选任务；备用来源、URL 或查询应合并到一个 source-discovery/web_search 任务中，或等待当前候选结果后再决定是否追加替代。",
+        "改写搜索 query 时把实体、代码、指标、地区和口径放在前面；latest/current/最新/近期 这类通用词只能辅助限定时效，不要让它们成为主要查询词。",
         "codex-cli 只用于需要真实浏览器自动化或本地电脑自动化的 worker 任务；公开联网取证用 web tool，文档渲染用 document tool，普通分析用模型 worker。",
         "如果下一步需要真实联网、公开网页搜索、公开 API 抓取或外部页面读取，只读取证任务必须使用 type web_search/web_read/api_read、toolWorker web、modelPool free，并要求 URL/status/title/text/API evidence。",
         "工具层只执行你指定的通用查询或 URL，不会替你选择业务来源。若 web_search 证据与任务查询无关或验证失败，下一步应改写更精确查询，或由你选择可信公开 URL/API 后规划 web_read/api_read。",
+        "如果多次公开搜索只返回导航页、百科页、旅游页、词典页或低相关页面，下一步必须切换取证方法：由你选择公开、无需登录、可读取的 URL/API，并规划 web_read/api_read 读取；不要继续重复宽泛搜索。",
         "重试公开搜索时必须改变查询条件：使用更精确实体、代码、别名、引号或另一种语言；不要重复已失败的查询，也不要继续偏向已返回登录、验证码、付费或无关页面的来源。",
         "遇到失败来源时，要先看用户消息里的“联网取证诊断”：不要重复同一失败 URL、域名或查询；可以由你规划新的 source-discovery web_search 来寻找公开、无需登录、可读取的候选来源，再用 web_read/api_read 读取你选择的新 URL。",
         "同一取证任务可在 input 中用分号/换行列出 2-4 个 agent 自己选择的候选查询；这些查询必须服务于同一事实缺口，优先包含精确实体、标准英文/代码/缩写、关键口径或另一种语言，不能让工具层替你做业务判断。",
@@ -350,6 +472,7 @@ function makeProgressMessages(
         "如果目标要求输出文档、PDF、DOCX、Markdown、HTML 或文本文件，必须检查是否已有真实 document artifact。普通 analysis worker 只能准备正文，不能声称已经创建本地文件。",
         "缺少文档产物时，下一步应规划 type document_generate、toolWorker document、modelPool free 的通用渲染任务，并要求 artifact path、format、size、hash、createdAt 和 file evidence。文档工具只渲染上游内容，不替你补事实。",
         "文档任务完成前必须确认文件存在、非空、格式匹配、可基本读取或解析，且内容基于上游 evidence；缺一项就 continue、blocked 或 failed，不要返回 done。",
+        "如果已验证证据足以形成部分或完整答案，不要继续补相同事实；缺失证据无法继续获取时，应返回 done 并在 final_answer 里明确列出缺口和不确定性。",
         "review 输出描述的是下一批待执行任务，不是已完成动作。不要把未来的浏览器、shell、API 或文件步骤写成完成证据。",
         "硬性完成条件：只要当前计划中仍有真实 worker 任务处于 waiting、running、blocked、waiting_human、awaiting_confirmation，或 retry_ready/needs_evidence 且仍有可用尝试次数，就不得返回 status done 或 final_answer；必须让任务继续执行、规划恢复/补证据任务，或让运行时明确阻塞。",
         "planning、strategy、review、verification、decision、final、summary 是元任务；它们应检查证据并决策，不能声称工具执行已经发生。",
@@ -376,16 +499,15 @@ function makeProgressMessages(
         "原始对话:",
         messagesToText(originalMessages),
         "",
-        "当前计划:",
-        JSON.stringify(plan),
-        strategy ? ["", "当前 strategy:", JSON.stringify(strategy)].join("\n") : "",
+        compactPlanForReview(plan),
+        strategy ? ["", compactStrategyForReview(strategy)].join("\n") : "",
         "",
-        unresolvedTaskInventory((plan && plan.tasks) || []),
+        unresolvedTaskInventory(planTasks, 8),
         "",
-        verifiedEvidenceInventory((plan && plan.tasks) || [], results),
+        verifiedEvidenceInventory(planTasks, results, 8),
         "",
         "Worker 结果:",
-        results.map((result) => compactWorkerResult(result)).join("\n\n"),
+        compactWorkerResultsForReview(planTasks, results),
         webSourceDiagnostics(results)
       ].join("\n")
     }
@@ -416,6 +538,9 @@ function normalizeGoalReview(review, config, messages = [], strategy = null, opt
 
 module.exports = {
   compactWorkerEvidence,
+  compactWorkerResultsForReview,
+  compactPlanForReview,
+  compactStrategyForReview,
   compactWorkerResult,
   makeProgressMessages,
   normalizeGoalReview,

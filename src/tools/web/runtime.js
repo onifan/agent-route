@@ -94,6 +94,11 @@ const SEARCH_RELEVANCE_STOPWORDS = new Set([
   "正文",
   "状态"
 ]);
+const DICTIONARY_RESULT_PATTERN =
+  /\b(dictionary|translate|translation|definition|meaning|pronunciation|thesaurus|vocabulary)\b|词典|字典|翻译|释义|意思|读音|发音/i;
+const DICTIONARY_LOOKUP_QUERY_PATTERN =
+  /\b(define|definition|meaning|translate|translation|pronounce|pronunciation|synonym|thesaurus|dictionary)\b|什么意思|是什么含义|翻译|释义|读音|发音|同义词/i;
+const NON_ENTITY_IDENTIFIERS = new Set(["API", "CSV", "HTML", "HTTP", "HTTPS", "JSON", "PDF", "URL"]);
 
 function collapseText(value, max = DEFAULT_TEXT_LIMIT) {
   const text = String(value == null ? "" : value)
@@ -206,8 +211,48 @@ function searchResultRelevanceScore(query = "", result = {}) {
   return queryTokens.filter((token) => haystack.includes(token)).length;
 }
 
+function minimumSearchRelevanceScore(query = "") {
+  const tokens = searchRelevanceTokens(query).slice(0, 12);
+  if (tokens.length <= 2) return 1;
+  if (tokens.length <= 5) return 2;
+  return 3;
+}
+
+function isDictionaryLikeSearchResult(query = "", result = {}) {
+  if (DICTIONARY_LOOKUP_QUERY_PATTERN.test(String(query || ""))) return false;
+  return DICTIONARY_RESULT_PATTERN.test([result.title, result.snippet, result.url].filter(Boolean).join(" "));
+}
+
+function isLowRelevanceSearchResult(query = "", result = {}) {
+  const tokens = searchRelevanceTokens(query).slice(0, 12);
+  if (tokens.length < 2) return false;
+  return searchResultRelevanceScore(query, result) < minimumSearchRelevanceScore(query);
+}
+
+function missingQueryIdentifiers(query = "", result = {}) {
+  const required = [
+    ...new Set(
+      Array.from(String(query || "").matchAll(/\b[A-Z][A-Z0-9]{1,11}\b/g), (match) => match[0]).filter(
+        (token) => !NON_ENTITY_IDENTIFIERS.has(token)
+      )
+    )
+  ];
+  if (!required.length) return false;
+  const haystack = [result.title, result.snippet, result.url].filter(Boolean).join(" ").toUpperCase();
+  return required.some((token) => !haystack.includes(token));
+}
+
+function isRejectedSearchResult(query = "", result = {}) {
+  return (
+    isDictionaryLikeSearchResult(query, result) ||
+    isLowRelevanceSearchResult(query, result) ||
+    missingQueryIdentifiers(query, result)
+  );
+}
+
 function prioritizedSearchResults(results = [], query = "", limit = DEFAULT_RESULT_SCAN_LIMIT) {
   return (results || [])
+    .filter((result) => !isRejectedSearchResult(query, result))
     .map((result, index) => ({
       result,
       index,
@@ -325,12 +370,14 @@ function enumOption(value, allowed = [], fallback = "") {
 }
 
 function shouldUseFetchTransport(options = {}) {
+  const explicitTransport = enumOption(
+    options.transport || process.env.AGENT_ROUTE_WEB_TRANSPORT,
+    ["fetch", "curl"],
+    ""
+  );
+  if (explicitTransport) return explicitTransport === "fetch";
   if (typeof options.fetchImpl === "function") return true;
-  if (options.transport === "fetch") return true;
-  if (process.env.AGENT_ROUTE_WEB_TRANSPORT === "fetch") return true;
-  if (options.transport === "curl") return false;
-  if (process.env.AGENT_ROUTE_WEB_TRANSPORT === "curl") return false;
-  return typeof globalThis.fetch === "function";
+  return false;
 }
 
 function parseCurlHeaderBlock(rawHeaders = "") {
@@ -465,24 +512,14 @@ async function readUrlWithCurl(url, options = {}) {
 }
 
 async function readPublicUrl(url, options = {}) {
-  const preferFetch = shouldUseFetchTransport(options);
-  const primary = preferFetch ? readUrlWithFetch : readUrlWithCurl;
-  const secondary = preferFetch ? readUrlWithCurl : readUrlWithFetch;
+  const useFetch = shouldUseFetchTransport(options);
+  const transport = useFetch ? "fetch" : "curl";
+  const readUrl = useFetch ? readUrlWithFetch : readUrlWithCurl;
   try {
-    return await primary(url, options);
+    return await readUrl(url, options);
   } catch (err) {
-    if (options.transportFailover === false || options.transport_failover === false) throw err;
-    try {
-      return await secondary(url, options);
-    } catch (secondaryErr) {
-      const primaryMessage = err && err.message ? err.message : String(err);
-      const secondaryMessage = secondaryErr && secondaryErr.message ? secondaryErr.message : String(secondaryErr);
-      throw new Error(
-        redactSensitiveText(
-          `${preferFetch ? "fetch" : "curl"} transport failed: ${primaryMessage}; ${preferFetch ? "curl" : "fetch"} transport failed: ${secondaryMessage}`
-        )
-      );
-    }
+    const message = err && err.message ? err.message : String(err);
+    throw new Error(redactSensitiveText(`${transport} transport failed: ${message}`));
   }
 }
 
@@ -1053,22 +1090,28 @@ async function searchWebWithTavily(normalizedQuery, options = {}, startedAt = Da
 }
 
 async function searchWebWithBingHtml(normalizedQuery, options = {}, startedAt = Date.now()) {
-  const searchUrl = `${SEARCH_ENDPOINT}?q=${encodeURIComponent(normalizedQuery)}&cc=us&setlang=en-US`;
+  const searchUrl = `${SEARCH_ENDPOINT}?q=${encodeURIComponent(normalizedQuery)}&cc=us&mkt=en-US&setlang=en-US&ensearch=1`;
   const fetched = await fetchWebUrl(searchUrl, {
     ...options,
     textLimit: Math.max(Number(options.textLimit || DEFAULT_TEXT_LIMIT), 12000),
     bodyLimit: Math.max(Number(options.bodyLimit || DEFAULT_TEXT_LIMIT), 120000)
   });
-  const results = fetched.ok
+  const parsedResults = fetched.ok
     ? parseSearchResults(fetched.bodyPreview || fetched.textPreview, options.limit || DEFAULT_SEARCH_LIMIT)
     : [];
+  const relevantResults = parsedResults.filter((result) => !isRejectedSearchResult(normalizedQuery, result));
+  const relevanceRelaxed = parsedResults.length > 0 && relevantResults.length === 0;
+  const results = relevanceRelaxed ? parsedResults : relevantResults;
   const resultFetchLimit = Math.max(0, Math.min(Number(options.resultFetchLimit ?? 3), results.length, 5));
   const resultScanLimit = Math.max(
     resultFetchLimit,
     Math.min(Number(options.resultScanLimit ?? DEFAULT_RESULT_SCAN_LIMIT), results.length)
   );
   const fetchedPages = [];
-  for (const item of prioritizedSearchResults(results, normalizedQuery, resultScanLimit)) {
+  const scanCandidates = relevanceRelaxed
+    ? results.slice(0, resultScanLimit)
+    : prioritizedSearchResults(results, normalizedQuery, resultScanLimit);
+  for (const item of scanCandidates) {
     if (resultFetchLimit > 0 && fetchedPages.filter((page) => page.ok).length >= resultFetchLimit) break;
     const page = await fetchWebUrl(item.url, {
       ...options,
@@ -1177,8 +1220,10 @@ async function searchWebWithBingHtml(normalizedQuery, options = {}, startedAt = 
       addressesCriteria: results.length > 0 && !noReadableResultPages,
       criteriaCoverage: results.length > 0 && !noReadableResultPages ? 0.8 : 0.2,
       qualityScore: results.length > 0 && !noReadableResultPages ? 0.78 : 0.25,
-      qualityNotes: [],
-      qualityIssues: !results.length
+      qualityNotes: relevanceRelaxed
+        ? ["Parsed result links were all low-confidence for the query; returned candidates for verifier judgment."]
+        : [],
+      qualityIssues: !parsedResults.length
         ? ["Search returned no parseable result links."]
         : noReadableResultPages
           ? ["Search result links were found, but no readable result page evidence was captured."]
@@ -1197,7 +1242,7 @@ async function searchWebWithBingHtml(normalizedQuery, options = {}, startedAt = 
     bodyPreview: fetched.bodyPreview || "",
     elapsedMs: Date.now() - startedAt,
     evidence,
-    error: !results.length
+    error: !parsedResults.length
       ? fetched.error || "Web search returned no parseable results."
       : noReadableResultPages
         ? "Search returned result links, but no readable result page evidence was captured."

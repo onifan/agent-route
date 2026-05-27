@@ -1334,6 +1334,8 @@ function isReadOnlyEvidenceCollectionTask(task = {}) {
 function evidenceKindForTask(task = {}) {
   const type = String(task.type || task.taskType || "").toLowerCase();
   const toolWorker = String(task.toolWorker || task.tool_worker || "").toLowerCase();
+  const modelPool = String(task.modelPool || task.model_pool || "").toLowerCase();
+  if (/^(shell|terminal|command|local_execution)$/.test(type) || modelPool === "codex-cli") return "shell_execution";
   if (type === "web_search") return "web_search_result";
   if (type === "api_read" || type === "public_api_read" || type === "http_fetch") return "api_response";
   if (toolWorker === "web" || /^web_/.test(type)) return "web_page";
@@ -1344,6 +1346,7 @@ function evidenceKindForTask(task = {}) {
 function evidenceFieldsForKind(kind = "") {
   if (kind === "web_search_result" || kind === "web_page") return ["url", "status", "title", "text", "timestamp"];
   if (kind === "api_response") return ["url", "status", "body", "timestamp"];
+  if (kind === "shell_execution") return ["command", "exitCode", "stdout", "stderr", "timestamp"];
   if (kind === "browser_observation") return ["url", "title", "visibleText", "timestamp"];
   return ["summary", "claims", "timestamp"];
 }

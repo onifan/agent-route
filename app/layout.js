@@ -23,7 +23,7 @@ export default function RootLayout({ children }) {
           dangerouslySetInnerHTML={{
             __html: `(function(){
 var draftKey="agent-route.goal-draft.v1";
-function getGoalInput(){return document.getElementById("goalText")}
+function getGoalInput(){return document.getElementById("agentChatInput")||document.getElementById("goalText")}
 function getPriorityInput(){return document.querySelector('select[aria-label="优先级"]')||document.querySelector('select[aria-label="Priority"]')}
 function safeDraft(){
   try{var parsed=JSON.parse(localStorage.getItem(draftKey)||"null");return parsed&&typeof parsed==="object"?parsed:null}catch{return null}
@@ -88,12 +88,8 @@ function closeSettings(){
 function switchAgentRouteSection(section){
   if(!section)return;
   var labels={
-    control:["控制中心","创建目标、查看当前目标状态，并启动安全的目标驱动流程。"],
     chat:["聊天","消息流和内部过程"],
     monitor:["监控中心","观察目标、任务、风险、验证、预算、恢复和事件时间线。"],
-    tasks:["任务视图","任务队列、依赖图和人工处理"],
-    graph:["执行图","查看依赖关系、可执行任务、阻塞链和产物流向。"],
-    queue:["任务队列","处理等待确认、阻塞、失败、重试和已完成任务。"],
     models:["模型管理","查看模型等级、成本状态，并调整路由配置。"],
     providers:["供应商设置","管理供应商、API Key 和自定义模型端点。"],
     memory:["记忆","检索和维护长期经验，帮助系统减少重复错误。"],
@@ -140,6 +136,7 @@ document.addEventListener("click",function(e){
   if(tab){setTab(tab.getAttribute("data-settings-tab"));return}
   var scroll=e.target.closest("[data-scroll-target]");
   if(scroll){switchAgentRouteSection(scroll.getAttribute("data-scroll-target"));return}
+  if(e.target.closest("[data-focus-agent-chat]")){switchAgentRouteSection("chat");setTimeout(function(){var chat=document.getElementById("agentChatInput");if(chat)chat.focus()},40);return}
   if(e.target.closest("[data-focus-goal]")){var goal=document.getElementById("goalText");if(goal)goal.focus()}
 });
 document.addEventListener("DOMContentLoaded",function(){

@@ -79,7 +79,7 @@ Agent 内部模型服务（`src/core/router`）按以下方式确定上游：
 | 变量                                                                | 默认            | 说明                                               |
 | ------------------------------------------------------------------- | --------------- | -------------------------------------------------- |
 | `AGENT_ROUTE_BROWSER_CHANNEL`                                       | `chrome`        | Playwright 浏览器 channel                          |
-| `AGENT_ROUTE_WEB_TRANSPORT`                                         | 自动            | `fetch` 或 `curl`，强制 web 工具的传输方式         |
+| `AGENT_ROUTE_WEB_TRANSPORT`                                         | `curl`          | `fetch` 或 `curl`，选择 web 工具的单一传输方式     |
 | `AGENT_ROUTE_WEB_SEARCH_PROVIDER`                                   | ——              | web 搜索 provider 选择                             |
 | `AGENT_ROUTE_TAVILY_API_KEY` / `TAVILY_API_KEY`                     | ——              | Tavily 搜索 key                                    |
 | `AGENT_ROUTE_CODEX_CWD`                                             | `process.cwd()` | codex-cli 工作目录                                 |
