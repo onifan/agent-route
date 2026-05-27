@@ -122,6 +122,16 @@ function stripHttpUrls(value = "") {
   );
 }
 
+function hasLocalFileReference(value = "") {
+  const text = stripHttpUrls(String(value || ""));
+  if (/(?:^|[\s"'“”‘’([{：:])(?:~|\.{1,2}|\/)[^\s"'“”‘’<>{}|]+(?:\/|\\)[^\s"'“”‘’<>{}|]*/.test(text)) {
+    return true;
+  }
+  return /(?:本机|本地|local|workspace|repo|repository|project|项目|文件|目录|路径|path)[^。.;\n]{0,160}(?:README(?:\.md)?|package\.json|[A-Za-z0-9_-]+\.(?:js|jsx|ts|tsx|json|md|mjs|cjs|css|html|yml|yaml|toml)|(?:^|[\s])(?:app|src|docs|scripts|public|config)\/)/i.test(
+    text
+  );
+}
+
 function hasBrowserOrLocalOperationRequiringCodex(value = "") {
   const text = stripBenignPublishMetadata(stripNegatedHighRiskText(stripHttpUrls(String(value || "").toLowerCase())));
   return (
@@ -232,9 +242,9 @@ function hasDocumentFileOutputIntent(value = "") {
   const hasOutputVerb = /生成|创建|输出|保存|导出|写成|制作|渲染|create|generate|write|save|export|render|produce/.test(
     text
   );
-  const hasDocumentTarget = /文档|报告文件|文档文件|产物|artifact|document|pdf|docx|word|markdown|html|txt|text/.test(
-    text
-  );
+  const hasDocumentTarget =
+    /文档|报告文件|文档文件|产物/.test(text) ||
+    /\b(?:artifact|document|pdf|docx|word|markdown|html|txt|text)\b/.test(text);
   return hasOutputVerb && hasDocumentTarget;
 }
 
@@ -625,14 +635,18 @@ function normalizePlan(plan, config, messages = [], strategy = null) {
       .filter(Boolean)
       .join("\n");
     const taskAndInput = [taskActionText, input].join("\n");
-    const explicitWebTool = String(task.toolWorker || task.tool_worker || "").toLowerCase() === "web";
+    const rawExplicitWebTool = String(task.toolWorker || task.tool_worker || "").toLowerCase() === "web";
     const explicitDocumentTool = ["document", "documents"].includes(
       String(task.toolWorker || task.tool_worker || "").toLowerCase()
     );
     const explicitBrowserTool =
       String(task.toolWorker || task.tool_worker || "").toLowerCase() === "browser" ||
       /^(browser|browser_read|page_read)$/i.test(rawType);
-    const explicitWebType = isWebToolType(rawType);
+    const localFileOperation = hasLocalFileReference(
+      [taskActionText, input, explicitInput || conversationInput].join("\n")
+    );
+    const explicitWebTool = rawExplicitWebTool && !localFileOperation;
+    const explicitWebType = isWebToolType(rawType) && !localFileOperation;
     const explicitDocumentType = isDocumentGenerationType(rawType);
     const taskSpecificRequiresCodex = hasBrowserOrLocalOperationRequiringCodex(taskActionText);
     const broaderInputRequiresCodex =
@@ -673,7 +687,8 @@ function normalizePlan(plan, config, messages = [], strategy = null) {
       !shouldRouteExternalReadToWeb &&
       !shouldRouteDocumentGeneration &&
       !isNonExecutablePlanningType(rawType) &&
-      hasBrowserOrLocalOperationRequiringCodex([taskActionText, explicitInput || conversationInput].join("\n"));
+      (localFileOperation ||
+        hasBrowserOrLocalOperationRequiringCodex([taskActionText, explicitInput || conversationInput].join("\n")));
     const requestedPool = shouldRouteExternalReadToWeb
       ? "free"
       : shouldRouteDocumentGeneration
@@ -683,6 +698,7 @@ function normalizePlan(plan, config, messages = [], strategy = null) {
           : requestedPoolFromPlan;
     const readOnlyBrowserTask =
       requestedPool === "codex-cli" &&
+      !localFileOperation &&
       (isReadOnlyBrowserText([taskActionText, input].filter(Boolean).join("\n")) ||
         (isReadOnlyBrowserGoal(messages) && !hasExplicitHighRiskBrowserAction(taskActionText)));
     const modelPool = normalizeExecutionModelPool(task, requestedPool);
@@ -739,13 +755,17 @@ function normalizePlan(plan, config, messages = [], strategy = null) {
           ? "document_generate"
           : readOnlyBrowserTask
             ? "browser"
-            : rawType,
+            : localFileOperation
+              ? "local_execution"
+              : rawType,
       modelPool,
       toolWorker: shouldRouteExternalReadToWeb
         ? "web"
         : shouldRouteDocumentGeneration
           ? "document"
-          : String(task.toolWorker || task.tool_worker || "").toLowerCase() || undefined,
+          : localFileOperation
+            ? undefined
+            : String(task.toolWorker || task.tool_worker || "").toLowerCase() || undefined,
       difficulty,
       complexity: difficulty,
       riskLevel: shouldRouteExternalReadToWeb
@@ -865,7 +885,7 @@ function makePlanPrompt(messages, config, memoryText = "", strategy = null, opti
           ? "web_search input 必须是你选择的精准查询；可用分号列 2-4 个候选，覆盖标准英文/代码/缩写/口径。工具层只执行你的查询或 URL，不替你选来源。"
           : "",
         needsWebTool
-          ? "不同事实/数据点拆成不同 web task；分号只用于同一事实的候选查询，不要把汇率、收益率、新闻等独立缺口塞进一个任务。"
+          ? "不同事实/数据点拆成不同 web task；分号只用于同一事实的候选查询，不要把多个独立缺口塞进一个任务。"
           : "",
         needsWebTool
           ? "不确定公开 URL/API 时先 source-discovery web_search；已有公开可读 URL/API 才 web_read/api_read。不要默认把某个来源名、站点名或域名塞进查询。"

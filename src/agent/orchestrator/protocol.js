@@ -17,13 +17,278 @@ const ROLE_SCHEMAS = {
   [KIND.PLAN]:
     '{"kind":"plan","schemaVersion":1,"tasks":[{"id":"short","title":"short","description":"what to do","type":"analysis|web_search|web_read|api_read|document_generate|verification|browser|local_execution","modelPool":"free|strong|coding|codex-cli","toolWorker":"web|document|browser|none","dependsOn":[],"successCriteria":[],"prompt":"specific worker instruction","input":"short query/url/input","riskLevel":"low|medium|high|critical","riskReasons":[],"routingReason":"short reason","maxAttempts":2}]}',
   [KIND.WORKER_RESULT]:
-    '{"kind":"worker_result","schemaVersion":1,"status":"success|failure|retry|blocked|awaiting_confirmation","actions":[],"output":"result","error":"","nextStep":"","artifacts":[],"evidence":{"summary":"what was observed","claims":[],"browser":{"beforeUrl":"","afterUrl":"","domChanged":false,"successMessage":"","errorMessage":"","screenshot":"","snapshot":""},"shell":{"command":"","exitCode":0,"stderr":"","stdout":"","outputDirs":[]},"files":[{"path":"","beforeSize":0,"afterSize":0,"expectedContent":""}],"apiResponses":[{"url":"","status":200,"body":"","writeConfirmed":false}],"semantic":{"outputSummary":"","addressesCriteria":true,"criteriaCoverage":1,"qualityScore":1,"qualityIssues":[]}},"memoryCandidates":[],"riskLevel":"low|medium|high|critical","riskReasons":[]}',
+    '{"kind":"worker_result","schemaVersion":1,"status":"success|failure|retry|blocked|awaiting_confirmation","actions":[],"output":"result","error":"","nextStep":"","artifacts":[],"evidence":{"summary":"what was observed","claims":[],"browser":{"beforeUrl":"","afterUrl":"","domChanged":false,"successMessage":"","errorMessage":"","screenshot":"","snapshot":""},"shell":{"command":"","exitCode":0,"stderr":"","stdout":"","outputDirs":[]},"files":[{"path":"","exists":true,"size":-1,"beforeSize":-1,"afterSize":-1,"role":"read|artifact|output|modified","expectedContent":"","expectedContentRequired":false}],"apiResponses":[{"url":"","status":200,"body":"","writeConfirmed":false}],"semantic":{"outputSummary":"","addressesCriteria":true,"criteriaCoverage":1,"qualityScore":1,"qualityIssues":[]}},"memoryCandidates":[],"riskLevel":"low|medium|high|critical","riskReasons":[]}',
   [KIND.VERIFICATION_RESULT]:
     '{"kind":"verification_result","schemaVersion":1,"verified":false,"verificationStatus":"verified|partially_verified|unverified","confidence":0.0,"reasons":[],"detectedIssues":[{"issue":"","severity":"low|medium|high|critical","retryable":true}],"reasonCode":"short","missingEvidence":[],"rejectedEvidence":[],"suggestedNextState":"completed|retrying|needs_evidence|failed|blocked|waiting_human","retryable":true}',
   [KIND.GOAL_REVIEW]:
     '{"kind":"goal_review","schemaVersion":1,"status":"done|continue","progress_summary":"short","final_answer":"markdown if done","strategy_revision_reason":"","next_tasks":[{"id":"short","title":"short","description":"what to do","type":"analysis|coding|browser|web_search|web_read|api_read|document_generate|verification|decision|local_execution|general","modelPool":"free|coding|strong|commander|codex-cli","toolWorker":"web|document|browser|none","difficulty":"low|medium|high|critical","riskLevel":"low|medium|high|critical","riskReasons":["short reason"],"successCriteria":["specific pass condition"],"dependsOn":["prior_task_id"],"produces":["artifact_id"],"consumes":["artifact_id"],"priority":0,"retryPolicy":{"scope":"self|downstream","maxRetries":1},"maxAttempts":2,"requiresHumanApproval":false,"requiresHumanConfirmation":false,"strategyId":"","strategicObjective":"","strategicPhase":"","strategicRationale":"","routingReason":"","prompt":"specific worker instruction","input":"task input"}],"memory_candidates":[{"type":"knowledge|episodic|procedure|working","importance":1,"title":"short","summary":"durable non-sensitive lesson","tags":["short"]}]}',
   [KIND.FINAL_ANSWER]:
     '{"kind":"final_answer","schemaVersion":1,"status":"completed|partial|failed|blocked|waiting_human","answerMarkdown":"final user-facing markdown answer","artifacts":[{"path":"","format":"","size":0,"hash":"","createdAt":"","verificationSummary":""}],"evidenceSummary":[],"uncertainties":[],"nextSteps":[]}'
+};
+
+function stringSchema() {
+  return { type: "string" };
+}
+
+function numberSchema() {
+  return { type: "number" };
+}
+
+function integerSchema() {
+  return { type: "integer" };
+}
+
+function booleanSchema() {
+  return { type: "boolean" };
+}
+
+function stringArraySchema() {
+  return {
+    type: "array",
+    items: stringSchema()
+  };
+}
+
+function arraySchema(items, options = {}) {
+  return {
+    type: "array",
+    items,
+    ...options
+  };
+}
+
+function strictObject(properties) {
+  return {
+    type: "object",
+    additionalProperties: false,
+    properties,
+    required: Object.keys(properties)
+  };
+}
+
+function retryPolicySchema() {
+  return strictObject({
+    scope: stringSchema(),
+    maxRetries: integerSchema()
+  });
+}
+
+function taskSchema() {
+  return strictObject({
+    id: stringSchema(),
+    title: stringSchema(),
+    description: stringSchema(),
+    type: stringSchema(),
+    modelPool: stringSchema(),
+    toolWorker: stringSchema(),
+    difficulty: stringSchema(),
+    riskLevel: stringSchema(),
+    riskReasons: stringArraySchema(),
+    successCriteria: stringArraySchema(),
+    dependsOn: stringArraySchema(),
+    produces: stringArraySchema(),
+    consumes: stringArraySchema(),
+    priority: integerSchema(),
+    retryPolicy: retryPolicySchema(),
+    maxAttempts: integerSchema(),
+    requiresHumanApproval: booleanSchema(),
+    requiresHumanConfirmation: booleanSchema(),
+    strategyId: stringSchema(),
+    strategicObjective: stringSchema(),
+    strategicPhase: stringSchema(),
+    strategicRationale: stringSchema(),
+    routingReason: stringSchema(),
+    prompt: stringSchema(),
+    input: stringSchema()
+  });
+}
+
+function memoryCandidateSchema() {
+  return strictObject({
+    type: stringSchema(),
+    importance: integerSchema(),
+    title: stringSchema(),
+    summary: stringSchema(),
+    tags: stringArraySchema()
+  });
+}
+
+function actionSchema() {
+  return strictObject({
+    type: stringSchema(),
+    action: stringSchema(),
+    description: stringSchema()
+  });
+}
+
+function browserEvidenceSchema() {
+  return strictObject({
+    beforeUrl: stringSchema(),
+    afterUrl: stringSchema(),
+    domChanged: booleanSchema(),
+    successMessage: stringSchema(),
+    errorMessage: stringSchema(),
+    screenshot: stringSchema(),
+    snapshot: stringSchema()
+  });
+}
+
+function shellEvidenceSchema() {
+  return strictObject({
+    command: stringSchema(),
+    exitCode: integerSchema(),
+    stderr: stringSchema(),
+    stdout: stringSchema(),
+    outputDirs: stringArraySchema()
+  });
+}
+
+function fileEvidenceSchema() {
+  return strictObject({
+    path: stringSchema(),
+    exists: booleanSchema(),
+    size: integerSchema(),
+    beforeSize: integerSchema(),
+    afterSize: integerSchema(),
+    role: stringSchema(),
+    expectedContent: stringSchema(),
+    expectedContentRequired: booleanSchema()
+  });
+}
+
+function apiResponseEvidenceSchema() {
+  return strictObject({
+    url: stringSchema(),
+    status: integerSchema(),
+    body: stringSchema(),
+    writeConfirmed: booleanSchema()
+  });
+}
+
+function semanticEvidenceSchema() {
+  return strictObject({
+    outputSummary: stringSchema(),
+    addressesCriteria: booleanSchema(),
+    criteriaCoverage: numberSchema(),
+    qualityScore: numberSchema(),
+    qualityIssues: stringArraySchema()
+  });
+}
+
+function workerEvidenceSchema() {
+  return strictObject({
+    summary: stringSchema(),
+    claims: stringArraySchema(),
+    actions: {
+      type: "array",
+      items: actionSchema()
+    },
+    browser: browserEvidenceSchema(),
+    shell: shellEvidenceSchema(),
+    files: {
+      type: "array",
+      items: fileEvidenceSchema()
+    },
+    apiResponses: {
+      type: "array",
+      items: apiResponseEvidenceSchema()
+    },
+    semantic: semanticEvidenceSchema()
+  });
+}
+
+function detectedIssueSchema() {
+  return strictObject({
+    issue: stringSchema(),
+    severity: stringSchema(),
+    retryable: booleanSchema()
+  });
+}
+
+function artifactSchema() {
+  return strictObject({
+    path: stringSchema(),
+    format: stringSchema(),
+    size: integerSchema(),
+    hash: stringSchema(),
+    createdAt: stringSchema(),
+    verificationSummary: stringSchema()
+  });
+}
+
+const RESPONSE_FORMAT_SCHEMAS = {
+  [KIND.PLAN]: strictObject({
+    kind: { type: "string", enum: [KIND.PLAN] },
+    schemaVersion: { type: "integer", enum: [PROTOCOL_VERSION] },
+    tasks: {
+      type: "array",
+      items: taskSchema()
+    },
+    memory_candidates: {
+      type: "array",
+      items: memoryCandidateSchema()
+    }
+  }),
+  [KIND.WORKER_RESULT]: strictObject({
+    kind: { type: "string", enum: [KIND.WORKER_RESULT] },
+    schemaVersion: { type: "integer", enum: [PROTOCOL_VERSION] },
+    status: stringSchema(),
+    actions: stringArraySchema(),
+    output: stringSchema(),
+    error: stringSchema(),
+    nextStep: stringSchema(),
+    artifacts: {
+      type: "array",
+      items: artifactSchema()
+    },
+    evidence: workerEvidenceSchema(),
+    memoryCandidates: {
+      type: "array",
+      items: memoryCandidateSchema()
+    },
+    riskLevel: stringSchema(),
+    riskReasons: stringArraySchema()
+  }),
+  [KIND.VERIFICATION_RESULT]: strictObject({
+    kind: { type: "string", enum: [KIND.VERIFICATION_RESULT] },
+    schemaVersion: { type: "integer", enum: [PROTOCOL_VERSION] },
+    verified: booleanSchema(),
+    verificationStatus: stringSchema(),
+    confidence: numberSchema(),
+    reasons: stringArraySchema(),
+    detectedIssues: {
+      type: "array",
+      items: detectedIssueSchema()
+    },
+    reasonCode: stringSchema(),
+    missingEvidence: stringArraySchema(),
+    rejectedEvidence: stringArraySchema(),
+    suggestedNextState: stringSchema(),
+    retryable: booleanSchema()
+  }),
+  [KIND.GOAL_REVIEW]: strictObject({
+    kind: { type: "string", enum: [KIND.GOAL_REVIEW] },
+    schemaVersion: { type: "integer", enum: [PROTOCOL_VERSION] },
+    status: stringSchema(),
+    progress_summary: stringSchema(),
+    final_answer: stringSchema(),
+    strategy_revision_reason: stringSchema(),
+    next_tasks: arraySchema(taskSchema(), { maxItems: 3 }),
+    memory_candidates: arraySchema(memoryCandidateSchema(), { maxItems: 8 })
+  }),
+  [KIND.FINAL_ANSWER]: strictObject({
+    kind: { type: "string", enum: [KIND.FINAL_ANSWER] },
+    schemaVersion: { type: "integer", enum: [PROTOCOL_VERSION] },
+    status: stringSchema(),
+    answerMarkdown: stringSchema(),
+    artifacts: {
+      type: "array",
+      items: artifactSchema()
+    },
+    evidenceSummary: stringArraySchema(),
+    uncertainties: stringArraySchema(),
+    nextSteps: stringArraySchema()
+  })
 };
 
 const ROLE_INSTRUCTIONS = {
@@ -330,12 +595,29 @@ function baseContract(kind) {
   ].join("\n");
 }
 
-function jsonModeRequestBody(body = {}, endpointMode = "chat") {
+function responseFormatName(kind = "") {
+  return `agent_route_${String(kind || "json").replace(/[^A-Za-z0-9_]+/g, "_")}`;
+}
+
+function responseFormatForKind(kind = "") {
+  const schema = RESPONSE_FORMAT_SCHEMAS[kind];
+  if (!schema) return { type: "json_object" };
+  return {
+    type: "json_schema",
+    json_schema: {
+      name: responseFormatName(kind),
+      strict: true,
+      schema
+    }
+  };
+}
+
+function jsonModeRequestBody(body = {}, endpointMode = "chat", kind = "") {
   if (endpointMode !== "chat") return body;
   if (body.response_format) return body;
   return {
     ...body,
-    response_format: { type: "json_object" }
+    response_format: responseFormatForKind(kind)
   };
 }
 
@@ -401,6 +683,7 @@ function validationForCall(content, expectedKind, validatePayload) {
 module.exports = {
   KIND,
   PROTOCOL_VERSION,
+  RESPONSE_FORMAT_SCHEMAS,
   ROLE_SCHEMAS,
   STRUCTURED_OUTPUT_SCHEMA_NAME,
   baseContract,

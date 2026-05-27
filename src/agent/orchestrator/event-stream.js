@@ -125,7 +125,21 @@ function uiDataPartIdForEvent(event = "", data = {}, sequence = 0) {
   const goalId = data.goal_id || data.goalId || "goal";
   const taskId = data.task_id || data.taskId || (data.task && data.task.id) || "";
   const key = String(event || "").toLowerCase();
-  if (taskId) return `${goalId}:task:${taskId}`;
+  if (taskId) {
+    if (key === "worker_start" || key === "worker_done") return `${goalId}:task:${taskId}:worker`;
+    if (key === "worker_log") return `${goalId}:task:${taskId}:worker_log:${sequence}`;
+    if (
+      key === "model_attempt" ||
+      key === "model_success" ||
+      key === "model_failure" ||
+      key === "model_timeout" ||
+      key === "model_retry" ||
+      key === "model_failover"
+    ) {
+      return `${goalId}:task:${taskId}:model`;
+    }
+    return `${goalId}:task:${taskId}:${key || "event"}`;
+  }
   if (key === "graph") return `${goalId}:graph`;
   if (key === "strategy") return `${goalId}:strategy`;
   if (key === "budget") return `${goalId}:budget`;
@@ -254,5 +268,6 @@ async function streamAgentRouteUiMessages(run, { observabilityRuntime, request }
 
 module.exports = {
   streamAgentRouteUiMessages,
-  summarizeEvent
+  summarizeEvent,
+  uiDataPartIdForEvent
 };

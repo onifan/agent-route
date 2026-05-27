@@ -10,7 +10,6 @@ import ProvidersDashboard from "../dashboard/providers/provider-console";
 const AGENT_ROUTE_UI_STREAM_API = "/api/agent-route/ui-stream";
 const STORAGE_KEY = "agent-route.dashboard.v3";
 const FALLBACK_STORAGE_KEY = "agent-route.studio.state.v1";
-const GOAL_DRAFT_KEY = "agent-route.goal-draft.v1";
 const COMMANDER_KEY = "agent-route.commander";
 const MODEL_SETTINGS_KEY = "agent-route.model-settings.v1";
 const MODEL_SETTINGS_VERSION = 2;
@@ -154,22 +153,12 @@ const DEFAULT_PROMPT_SETTINGS =
   promptDefaults.DEFAULT_PROMPT_SETTINGS || promptDefaults.default?.DEFAULT_PROMPT_SETTINGS || promptDefaults.default;
 
 const NAV_ITEMS = [
-  ["control", "控制中心", "home", "创建和推进目标"],
   ["chat", "聊天", "forum", "消息流和内部过程"],
   ["monitor", "监控中心", "monitoring", "运行状态和事件流"],
-  ["tasks", "任务视图", "list_alt", "任务队列、依赖图和人工处理"],
   ["models", "模型管理", "robot_2", "模型等级和预算"],
   ["providers", "供应商设置", "key", "供应商、API Key 和自定义模型端点"],
   ["memory", "记忆", "database", "长期经验"],
   ["logs", "执行日志", "terminal", "最近执行记录"]
-];
-
-const HOME_DETAIL_LINKS = [
-  ["tasks", "任务队列", "list", "阻塞、失败和人工确认", "queue"],
-  ["tasks", "任务图", "account_tree", "依赖关系、产物和可执行任务", "graph"],
-  ["monitor", "监控", "monitoring", "事件、恢复、预算和风险"],
-  ["models", "模型", "robot_2", "模型等级、路由和预算"],
-  ["providers", "供应商", "key", "API Key 和自定义端点"]
 ];
 
 const PROMPT_PREVIEW_APPENDICES = {
@@ -219,24 +208,25 @@ const FALLBACK_SUPPORTED_PROVIDERS = [
 ];
 
 const INTERNAL_ROUTE_TASK_IDS = new Set(["plan", "final"]);
-const NEW_TASK_DRAFT_ID = "__new_task_draft__";
 const TASK_PANEL_TABS = [
   ["queue", "任务队列", "list_alt", "任务状态和人工处理"],
   ["graph", "任务图", "account_tree", "依赖、阻塞和产物流"]
 ];
 
 function normalizeSectionTarget(section) {
-  const raw = String(section || "control")
+  const raw = String(section || "chat")
     .replace(/^#/, "")
     .trim();
-  if (raw === "graph" || raw === "queue") return { section: "tasks", taskTab: raw };
-  return { section: raw || "control", taskTab: "" };
+  if (raw === "graph" || raw === "queue") return { section: "chat", taskTab: raw };
+  if (raw === "tasks") return { section: "chat", taskTab: "queue" };
+  if (raw === "control") return { section: "chat", taskTab: "" };
+  return { section: raw || "chat", taskTab: "" };
 }
 
 function initialActiveSection() {
-  if (typeof window === "undefined") return "control";
+  if (typeof window === "undefined") return "chat";
   const target = normalizeSectionTarget(window.location.hash);
-  return NAV_ITEMS.some(([id]) => id === target.section) ? target.section : "control";
+  return NAV_ITEMS.some(([id]) => id === target.section) ? target.section : "chat";
 }
 
 function isRouteInternalTask(task) {
@@ -409,6 +399,7 @@ const FILTERS = [
   ["all", "全部"],
   ["running", "进行中"],
   ["queued", "等待中"],
+  ["needs_evidence", "证据不足"],
   ["blocked", "已阻塞"],
   ["completed", "已完成"],
   ["failed", "失败"]
@@ -1040,6 +1031,10 @@ function isRunnableTaskStatus(status) {
   return ["waiting", "queued", "pending", "retry_ready"].includes(String(status || ""));
 }
 
+function isQueuedTaskStatus(status) {
+  return ["waiting", "queued", "pending", "retry_ready"].includes(String(status || "").toLowerCase());
+}
+
 function taskDerivedGoalStatus(goal, tasks = []) {
   const current = String(goal?.status || "").toLowerCase();
   const visibleTasks = array(tasks).filter(isUserVisibleTask);
@@ -1062,15 +1057,6 @@ function taskDerivedGoalStatus(goal, tasks = []) {
     return current === "running" ? "running" : "queued";
   if (visibleTasks.every((task) => isDone(task.status) || isFailed(task.status))) return "failed";
   return current || "queued";
-}
-
-function shouldShowGoalInControl(goal, tasks = [], derivedStatus = "", streamRunning = false) {
-  if (!goal) return false;
-  if (array(tasks).filter(isUserVisibleTask).length) return true;
-  if (streamRunning) return true;
-  return ["queued", "pending", "waiting", "completed", "done", "failed", "blocked"].includes(
-    String(derivedStatus || "").toLowerCase()
-  );
 }
 
 function riskLabel(level) {
@@ -1217,14 +1203,6 @@ function displayStatus(value, fallback = "待命") {
 
 function hasHttpUrl(value = "") {
   return /\bhttps?:\/\/[^\s"'<>()[\]{}]+/i.test(String(value || ""));
-}
-
-function timelineRenderKey(item = {}, index = 0) {
-  const base = [item.id, item.time, item.label, item.level, item.message]
-    .filter(Boolean)
-    .map((value) => String(value).slice(0, 80))
-    .join("|");
-  return `timeline-${base || "item"}-${index}`;
 }
 
 function logRenderKey(line = {}, index = 0) {
@@ -1547,193 +1525,6 @@ function taskFailureReasons(task = {}) {
       return true;
     })
     .slice(0, 6);
-}
-
-function renderMarkdownInline(text, keyPrefix = "inline") {
-  const source = String(text || "");
-  const parts = [];
-  const pattern = /(`[^`]+`|\*\*[^*]+?\*\*|\*[^*\n]+?\*|\[[^\]\n]+?\]\(https?:\/\/[^)\s]+?\))/g;
-  let lastIndex = 0;
-  let match = null;
-  while ((match = pattern.exec(source))) {
-    if (match.index > lastIndex) parts.push(source.slice(lastIndex, match.index));
-    const token = match[0];
-    const key = `${keyPrefix}-${parts.length}-${match.index}`;
-    if (token.startsWith("`")) {
-      parts.push(<code key={key}>{token.slice(1, -1)}</code>);
-    } else if (token.startsWith("**")) {
-      parts.push(<strong key={key}>{renderMarkdownInline(token.slice(2, -2), `${key}-strong`)}</strong>);
-    } else if (token.startsWith("*")) {
-      parts.push(<em key={key}>{renderMarkdownInline(token.slice(1, -1), `${key}-em`)}</em>);
-    } else {
-      const linkMatch = token.match(/^\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)$/i);
-      if (linkMatch) {
-        parts.push(
-          <a key={key} href={linkMatch[2]} target="_blank" rel="noreferrer">
-            {linkMatch[1]}
-          </a>
-        );
-      } else {
-        parts.push(token);
-      }
-    }
-    lastIndex = pattern.lastIndex;
-  }
-  if (lastIndex < source.length) parts.push(source.slice(lastIndex));
-  return parts.length ? parts : source;
-}
-
-function isMarkdownTableSeparator(line = "") {
-  return /^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$/.test(String(line || ""));
-}
-
-function splitMarkdownTableRow(line = "") {
-  return String(line || "")
-    .trim()
-    .replace(/^\|/, "")
-    .replace(/\|$/, "")
-    .split("|")
-    .map((cell) => cell.trim());
-}
-
-function isMarkdownBlockStart(line = "", nextLine = "") {
-  const text = String(line || "");
-  if (!text.trim()) return true;
-  if (/^\s*```/.test(text)) return true;
-  if (/^\s{0,3}#{1,6}\s+/.test(text)) return true;
-  if (/^\s{0,3}>\s?/.test(text)) return true;
-  if (/^\s{0,3}([-*+])\s+/.test(text)) return true;
-  if (/^\s{0,3}\d+[.)]\s+/.test(text)) return true;
-  return text.includes("|") && isMarkdownTableSeparator(nextLine);
-}
-
-function MarkdownOutput({ content }) {
-  const lines = String(content || "")
-    .replace(/\r\n/g, "\n")
-    .split("\n");
-  const blocks = [];
-  for (let index = 0; index < lines.length; index += 1) {
-    const line = lines[index];
-    const trimmed = line.trim();
-    if (!trimmed) continue;
-
-    if (/^\s*```/.test(line)) {
-      const language = trimmed.replace(/^```/, "").trim();
-      const codeLines = [];
-      index += 1;
-      while (index < lines.length && !/^\s*```/.test(lines[index])) {
-        codeLines.push(lines[index]);
-        index += 1;
-      }
-      blocks.push(
-        <pre key={`code-${blocks.length}`} data-language={language || undefined}>
-          <code>{codeLines.join("\n")}</code>
-        </pre>
-      );
-      continue;
-    }
-
-    const heading = line.match(/^\s{0,3}(#{1,6})\s+(.+)$/);
-    if (heading) {
-      const level = heading[1].length;
-      const HeadingTag = `h${Math.min(4, Math.max(2, level + 1))}`;
-      blocks.push(
-        <HeadingTag key={`heading-${blocks.length}`}>
-          {renderMarkdownInline(heading[2].replace(/\s+#+\s*$/, ""), `heading-${blocks.length}`)}
-        </HeadingTag>
-      );
-      continue;
-    }
-
-    if (/^\s{0,3}>\s?/.test(line)) {
-      const quoteLines = [];
-      while (index < lines.length && /^\s{0,3}>\s?/.test(lines[index])) {
-        quoteLines.push(lines[index].replace(/^\s{0,3}>\s?/, ""));
-        index += 1;
-      }
-      index -= 1;
-      blocks.push(
-        <blockquote key={`quote-${blocks.length}`}>
-          {renderMarkdownInline(quoteLines.join(" "), `quote-${blocks.length}`)}
-        </blockquote>
-      );
-      continue;
-    }
-
-    if (line.includes("|") && isMarkdownTableSeparator(lines[index + 1])) {
-      const header = splitMarkdownTableRow(line);
-      index += 2;
-      const rows = [];
-      while (index < lines.length && lines[index].includes("|") && lines[index].trim()) {
-        rows.push(splitMarkdownTableRow(lines[index]));
-        index += 1;
-      }
-      index -= 1;
-      blocks.push(
-        <div className="markdown-table-wrap" key={`table-${blocks.length}`}>
-          <table>
-            <thead>
-              <tr>
-                {header.map((cell, cellIndex) => (
-                  <th key={`h-${cellIndex}`}>{renderMarkdownInline(cell, `table-${blocks.length}-h-${cellIndex}`)}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((row, rowIndex) => (
-                <tr key={`r-${rowIndex}`}>
-                  {header.map((_, cellIndex) => (
-                    <td key={`c-${cellIndex}`}>
-                      {renderMarkdownInline(row[cellIndex] || "", `table-${blocks.length}-${rowIndex}-${cellIndex}`)}
-                    </td>
-                  ))}
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      );
-      continue;
-    }
-
-    const unordered = line.match(/^\s{0,3}([-*+])\s+(.+)$/);
-    const ordered = line.match(/^\s{0,3}\d+[.)]\s+(.+)$/);
-    if (unordered || ordered) {
-      const orderedList = Boolean(ordered);
-      const items = [];
-      while (index < lines.length) {
-        const itemMatch = orderedList
-          ? lines[index].match(/^\s{0,3}\d+[.)]\s+(.+)$/)
-          : lines[index].match(/^\s{0,3}[-*+]\s+(.+)$/);
-        if (!itemMatch) break;
-        items.push(itemMatch[1]);
-        index += 1;
-      }
-      index -= 1;
-      const ListTag = orderedList ? "ol" : "ul";
-      blocks.push(
-        <ListTag key={`list-${blocks.length}`}>
-          {items.map((item, itemIndex) => (
-            <li key={`item-${itemIndex}`}>{renderMarkdownInline(item, `list-${blocks.length}-${itemIndex}`)}</li>
-          ))}
-        </ListTag>
-      );
-      continue;
-    }
-
-    const paragraphLines = [trimmed];
-    while (index + 1 < lines.length && !isMarkdownBlockStart(lines[index + 1], lines[index + 2] || "")) {
-      index += 1;
-      paragraphLines.push(lines[index].trim());
-    }
-    blocks.push(
-      <p key={`paragraph-${blocks.length}`}>
-        {renderMarkdownInline(paragraphLines.join(" "), `paragraph-${blocks.length}`)}
-      </p>
-    );
-  }
-
-  return <div className="final-output markdown-output">{blocks.length ? blocks : <p>{content}</p>}</div>;
 }
 
 function uniqueDisplayList(values = []) {
@@ -2566,7 +2357,13 @@ function localDiagnostics(goal, graph) {
 function buildClientMonitor(goal, graph, observability) {
   const tasks = array(goal?.tasks).filter(isUserVisibleTask);
   const derivedStatus = goal ? taskDerivedGoalStatus(goal, tasks) : "";
-  const hasVisibleGoal = shouldShowGoalInControl(goal, tasks, derivedStatus, false);
+  const hasVisibleGoal = Boolean(
+    goal &&
+    (tasks.length ||
+      ["queued", "pending", "waiting", "completed", "done", "failed", "blocked"].includes(
+        String(derivedStatus || "").toLowerCase()
+      ))
+  );
   if (!goal || !hasVisibleGoal) {
     const monitorReset = Boolean(observability?.monitorReset);
     const events = monitorReset
@@ -2719,27 +2516,6 @@ function initialTheme() {
   return window.localStorage.getItem(THEME_KEY) === "light" ? "light" : "dark";
 }
 
-function initialGoalDraft() {
-  return { goalText: "", priority: "normal" };
-}
-
-function loadGoalDraft() {
-  if (typeof window === "undefined") return { goalText: "", priority: "normal" };
-  try {
-    const parsed = JSON.parse(window.localStorage.getItem(GOAL_DRAFT_KEY) || "null");
-    if (!parsed || typeof parsed !== "object") return { goalText: "", priority: "normal" };
-    const nextPriority = ["normal", "high", "urgent", "critical"].includes(parsed.priority)
-      ? parsed.priority
-      : "normal";
-    return {
-      goalText: String(parsed.goalText || ""),
-      priority: nextPriority
-    };
-  } catch {
-    return { goalText: "", priority: "normal" };
-  }
-}
-
 export default function AgentRouteStudio() {
   const [state, setState] = useState(initialState);
   const [modelSettings, setModelSettings] = useState(() => normalizeModelSettings({}));
@@ -2748,15 +2524,12 @@ export default function AgentRouteStudio() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsTab, setSettingsTab] = useState("models");
   const [theme, setTheme] = useState("dark");
-  const initialDraft = useMemo(initialGoalDraft, []);
-  const [goalText, setGoalText] = useState(initialDraft.goalText);
-  const [priority, setPriority] = useState(initialDraft.priority);
   const [storageReady, setStorageReady] = useState(false);
   const [memoryQuery, setMemoryQuery] = useState("");
   const [manualMemory, setManualMemory] = useState("");
   const [recoveryLoading, setRecoveryLoading] = useState(false);
   const [recoveryError, setRecoveryError] = useState("");
-  const [activeSection, setActiveSection] = useState("control");
+  const [activeSection, setActiveSection] = useState("chat");
   const [selectedGraphTaskId, setSelectedGraphTaskId] = useState("");
   const [selectedQueueTaskId, setSelectedQueueTaskId] = useState("");
   const [graphViewMode, setGraphViewMode] = useState("graph");
@@ -2767,8 +2540,6 @@ export default function AgentRouteStudio() {
 
   useEffect(() => {
     document.documentElement.dataset.agentRouteHydrated = "true";
-    const draft = loadGoalDraft();
-    const liveGoalText = document.getElementById("goalText")?.value || "";
     const loadedModelSettings = loadModelSettings();
     setState(loadStoredState());
     setModelSettings(loadedModelSettings);
@@ -2776,8 +2547,6 @@ export default function AgentRouteStudio() {
     setPromptSettings(loadPromptSettings());
     setBudgetSettings(loadBudgetSettings());
     setTheme(initialTheme());
-    setGoalText((current) => current || liveGoalText || draft.goalText);
-    setPriority((current) => current || draft.priority);
     setActiveSection(initialActiveSection());
     const initialTarget = normalizeSectionTarget(window.location.hash);
     if (initialTarget.taskTab) setTaskPanelTab(initialTarget.taskTab);
@@ -2790,19 +2559,12 @@ export default function AgentRouteStudio() {
   }, [state, storageReady]);
   useEffect(() => {
     if (!storageReady) return;
-    save(GOAL_DRAFT_KEY, { goalText, priority, updatedAt: new Date().toISOString() });
-  }, [goalText, priority, storageReady]);
-  useEffect(() => {
-    if (!storageReady) return;
     document.documentElement.dataset.theme = theme;
     window.localStorage.setItem(THEME_KEY, theme);
   }, [theme, storageReady]);
 
   const activeGoal = useMemo(
-    () =>
-      state.activeGoalId === NEW_TASK_DRAFT_ID
-        ? null
-        : state.goals.find((goal) => goal.id === state.activeGoalId) || state.goals[0] || null,
+    () => state.goals.find((goal) => goal.id === state.activeGoalId) || state.goals[0] || null,
     [state.goals, state.activeGoalId]
   );
   const graph = useMemo(() => {
@@ -2854,7 +2616,7 @@ export default function AgentRouteStudio() {
     let tasks = array(activeGoal?.tasks).filter(isUserVisibleTask);
     if (state.filter !== "all") {
       tasks = tasks.filter((task) => {
-        if (state.filter === "queued") return isWaiting(task.status);
+        if (state.filter === "queued") return isQueuedTaskStatus(task.status);
         if (state.filter === "completed") return isDone(task.status);
         if (state.filter === "failed") return isQueueFailedStatus(task.status);
         if (state.filter === "blocked")
@@ -3208,37 +2970,6 @@ export default function AgentRouteStudio() {
     }
   }
 
-  function createGoal(runNow) {
-    const text = goalText.trim();
-    if (!text) return;
-    const goal = {
-      id: uid("goal"),
-      title: shortText(text, 76) || "新目标",
-      goal: text,
-      commander: modelSettings.defaultCommander,
-      priority,
-      status: "queued",
-      createdAt: nowTime(),
-      updatedAt: nowTime(),
-      flow: {},
-      tasks: [],
-      strategy: null,
-      strategyHistory: [],
-      graph: null,
-      output: ""
-    };
-    setState((current) => ({
-      ...current,
-      goals: [goal, ...current.goals].slice(0, 40),
-      activeGoalId: goal.id,
-      filter: "all"
-    }));
-    setGoalText("");
-    save(GOAL_DRAFT_KEY, { goalText: "", priority, updatedAt: new Date().toISOString() });
-    addLog(`目标已创建：${goal.title}`, "success");
-    if (runNow) setTimeout(() => runGoal(goal), 0);
-  }
-
   function registerChatGoal({ id, text, commanderModel }) {
     const goalTextValue = String(text || "").trim();
     if (!id || !goalTextValue) return;
@@ -3270,6 +3001,40 @@ export default function AgentRouteStudio() {
       return { ...current, goals, activeGoalId: id, filter: "all" };
     });
     addLog(`聊天目标已启动：${goal.title}`, "success");
+  }
+
+  function markChatGoalStopped({ id }) {
+    if (!id) return;
+    patchGoal(id, (goal) => ({
+      ...goal,
+      status: "stopped",
+      updatedAt: nowTime(),
+      flow: { ...(goal.flow || {}), done: "failed" },
+      tasks: array(goal.tasks).map((task) => {
+        const status = String(task.status || "").toLowerCase();
+        if (
+          isDone(status) ||
+          [
+            "failed",
+            "blocked",
+            "canceled",
+            "cancelled",
+            "needs_evidence",
+            "waiting_human",
+            "awaiting_confirmation"
+          ].includes(status)
+        ) {
+          return task;
+        }
+        return {
+          ...task,
+          status: "canceled",
+          blockedReason: task.blockedReason || "用户停止了本次执行流",
+          updatedAt: nowTime()
+        };
+      })
+    }));
+    addLog("聊天目标已停止", "warn");
   }
 
   async function taskAction(task, action) {
@@ -3546,28 +3311,6 @@ export default function AgentRouteStudio() {
     await loadMemories();
   }
 
-  function pauseAll() {
-    abortRef.current?.abort();
-    abortRef.current = null;
-    setState((current) => ({
-      ...current,
-      goals: current.goals.map((goal) => (goal.status === "running" ? { ...goal, status: "stopped" } : goal))
-    }));
-    addLog("已请求暂停所有正在执行的目标", "warn");
-  }
-
-  function startNewTaskDraft() {
-    setGoalText("");
-    setPriority("normal");
-    setSelectedGraphTaskId("");
-    setSelectedQueueTaskId("");
-    setState((current) => ({ ...current, activeGoalId: NEW_TASK_DRAFT_ID }));
-    switchSection("control");
-    save(GOAL_DRAFT_KEY, { goalText: "", priority: "normal", updatedAt: new Date().toISOString() });
-    setTimeout(() => document.getElementById("goalText")?.focus(), 0);
-    addLog("已打开新任务草稿，旧任务不会被删除。", "info");
-  }
-
   function openSettings(tab = "models") {
     setSettingsTab(["models", "prompts", "budget"].includes(tab) ? tab : "models");
     setSettingsOpen(true);
@@ -3594,6 +3337,14 @@ export default function AgentRouteStudio() {
     }
   }
 
+  function focusChatComposer() {
+    switchSection("chat");
+    if (typeof document === "undefined") return;
+    setTimeout(() => {
+      document.getElementById("agentChatInput")?.focus();
+    }, 40);
+  }
+
   function updateCommander(value) {
     const next = saveModelSettings({ ...modelSettings, defaultCommander: value });
     setModelSettings(next);
@@ -3605,51 +3356,14 @@ export default function AgentRouteStudio() {
     DEFAULT_MODEL_POOLS.commander
   );
   const activeTasks = array(activeGoal?.tasks).filter(isUserVisibleTask);
-  const controlStatus = activeGoal ? taskDerivedGoalStatus(activeGoal, activeTasks) : "";
-  const activeGoalStatus = String(activeGoal?.status || "").toLowerCase();
-  const activeGoalFailed =
-    isFailed(activeGoalStatus) || ["waiting_human", "awaiting_confirmation"].includes(activeGoalStatus);
   const running = Boolean(abortRef.current);
-  const showControlGoal = shouldShowGoalInControl(activeGoal, activeTasks, controlStatus, running);
-  const controlDisplayStatus = showControlGoal
-    ? running && activeGoal?.status === "running" && !activeTasks.length
-      ? "running"
-      : controlStatus
-    : "";
-  const controlGoalText = showControlGoal
-    ? activeGoal?.goal
-    : "输入一个长期目标，AgentRoute 会先制定战略，再生成感知依赖关系的执行图。";
   const graphNodes = array(graph.nodes);
   const readyIds = readyIdList(graph);
   const blockedChains = array(graph.blockedChains);
   const artifacts = array(graph.artifacts);
   const parallelGroups = array(graph.parallelGroups);
   const activeNav = NAV_ITEMS.find(([id]) => id === activeSection) || NAV_ITEMS[0];
-  const attentionTaskCount = activeTasks.filter(needsHumanAttention).length;
-  const activeVerifiedTaskCount = activeTasks.filter(
-    (task) => String(task.verificationStatus || "").toLowerCase() === "verified"
-  ).length;
-  const verifiedTaskCount = activeTasks.length ? activeVerifiedTaskCount : (monitor.verificationHealth?.verified ?? 0);
-  const attentionTasks = activeTasks.filter(needsHumanAttention).slice(0, 4);
-  const recentLogs = array(state.logs).slice(-4).reverse();
-  const latestEvents = array(monitor.events)
-    .slice(0, 6)
-    .map((event, index) => ({
-      id: event.id || `${event.type || "event"}-${event.at || event.time || index}`,
-      time: event.time || (event.at ? new Date(event.at).toLocaleTimeString("zh-CN", { hour12: false }) : "--"),
-      label: eventTypeLabel(event.type),
-      level: event.severity || "info",
-      message: displayEventMessage(event)
-    }));
-  const latestTimeline = latestEvents.length
-    ? latestEvents
-    : recentLogs.map((line) => ({
-        id: line.id,
-        time: line.time || "--",
-        label: LOG_LEVEL_LABEL[line.level] || valueLabel(line.level) || line.level || "日志",
-        level: line.level || "info",
-        message: line.message
-      }));
+  const attentionTasks = activeTasks.filter(needsHumanAttention);
 
   function renderTaskWorkspacePanel() {
     return (
@@ -3678,6 +3392,46 @@ export default function AgentRouteStudio() {
         onRefreshGraph={() => refreshGraph().catch((err) => addLog(err.message, "error"))}
         onTaskAction={(task, action) => taskAction(task, action).catch((err) => addLog(err.message, "error"))}
       />
+    );
+  }
+
+  function renderChatAttentionPanel() {
+    return (
+      <section
+        className={`agent-chat-attention-panel ${attentionTasks.length ? "has-items" : "is-empty"}`}
+        aria-label="需要处理的任务"
+      >
+        <div className="agent-chat-attention-head">
+          <h2>需要处理</h2>
+          <span className={`pill ${attentionTasks.length ? "blocked" : "completed"}`}>{attentionTasks.length}</span>
+        </div>
+        {attentionTasks.length ? (
+          <div className="action-list">
+            {attentionTasks.slice(0, 4).map((task) => (
+              <button
+                className="attention-item"
+                key={task.id}
+                type="button"
+                onClick={() => {
+                  setTaskPanelTab("queue");
+                  setSelectedQueueTaskId(task.id);
+                  setSelectedGraphTaskId(task.id);
+                }}
+              >
+                <span className={`pill ${task.status}`}>{displayStatus(task.status, "任务")}</span>
+                <strong>{displayTask(task)}</strong>
+                <small>
+                  {task.blockedReason
+                    ? recoveryReasonLabel(task.blockedReason)
+                    : verificationReasonLabel(array(task.verificationReasons)[0]) ||
+                      array(task.authenticityWarnings)[0] ||
+                      "等待处理"}
+                </small>
+              </button>
+            ))}
+          </div>
+        ) : null}
+      </section>
     );
   }
 
@@ -3739,13 +3493,10 @@ export default function AgentRouteStudio() {
           </div>
         </section>
         <section className="side-panel">
-          <h2>快速操作</h2>
+          <h2>新任务</h2>
           <div className="quick">
-            <button className="primary" type="button" data-focus-goal onClick={startNewTaskDraft}>
-              <span className="material-symbols-outlined">add_task</span>创建新任务
-            </button>
-            <button type="button" onClick={pauseAll}>
-              <span className="material-symbols-outlined">pause_circle</span>暂停所有任务
+            <button type="button" className="primary" data-focus-agent-chat onClick={focusChatComposer}>
+              <span className="material-symbols-outlined">add_comment</span>创建新任务
             </button>
             <button type="button" data-open-settings="models" onClick={() => openSettings("models")}>
               <span className="material-symbols-outlined">tune</span>模型路由
@@ -3761,7 +3512,7 @@ export default function AgentRouteStudio() {
       </aside>
 
       <main className="main">
-        <header className="topbar" id="control">
+        <header className="topbar" id="chat">
           <button
             className="icon-btn mobile-menu-btn"
             type="button"
@@ -3813,189 +3564,6 @@ export default function AgentRouteStudio() {
 
         <div className={`workspace section-${activeSection}`}>
           <section className="center-col">
-            <div className="app-section" data-agent-section="control" hidden={activeSection !== "control"}>
-              <section className="panel">
-                <div className="panel-head">
-                  <h2>目标执行</h2>
-                  <div className="panel-head-actions">
-                    <button className="small-btn primary" type="button" onClick={startNewTaskDraft}>
-                      <span className="material-symbols-outlined">add_task</span>
-                      创建新任务
-                    </button>
-                    <span className={`pill ${controlDisplayStatus || ""}`}>
-                      {showControlGoal ? displayStatus(controlDisplayStatus) : "待命"}
-                    </span>
-                  </div>
-                </div>
-                <div className="control-body">
-                  <p className="goal-text">{controlGoalText}</p>
-                  {activeGoal?.recoverySummary ? (
-                    <div className="helper">
-                      运行恢复：{formatDateTime(activeGoal.recoverySummary.at)} ·{" "}
-                      {recoveryReasonLabel(activeGoal.recoverySummary.reason || activeGoal.recoverySummary.trigger)}
-                      {activeGoal.blockedReason ? ` · ${recoveryReasonLabel(activeGoal.blockedReason)}` : ""}
-                    </div>
-                  ) : null}
-                  <div className="metric-row home-metric-row">
-                    <div className="metric">
-                      <label>运行中</label>
-                      <strong>{summary.running}</strong>
-                    </div>
-                    <div className="metric">
-                      <label>需要处理</label>
-                      <strong>{attentionTaskCount}</strong>
-                    </div>
-                    <div className="metric">
-                      <label>已完成</label>
-                      <strong>
-                        {summary.done}/{summary.total}
-                      </strong>
-                    </div>
-                    <div className="metric">
-                      <label>验证通过</label>
-                      <strong>{verifiedTaskCount}</strong>
-                    </div>
-                  </div>
-                  <div className="field">
-                    <label htmlFor="goalText">新目标</label>
-                    <textarea
-                      id="goalText"
-                      value={goalText}
-                      onChange={(event) => setGoalText(event.target.value)}
-                      placeholder="例如：30 天内提升高质量自动化项目接单率，但提案提交必须人工确认。"
-                    />
-                    <div className="helper">草稿会自动保存在本地，页面刷新后会恢复。</div>
-                  </div>
-                  <div className="top-actions">
-                    <select value={priority} onChange={(event) => setPriority(event.target.value)} aria-label="优先级">
-                      <option value="normal">普通优先级</option>
-                      <option value="high">高优先级</option>
-                      <option value="urgent">紧急</option>
-                    </select>
-                    <button className="btn" type="button" onClick={() => createGoal(false)}>
-                      加入队列
-                    </button>
-                    <button className="btn primary" type="button" onClick={() => createGoal(true)}>
-                      创建并执行
-                    </button>
-                    {showControlGoal && activeGoal.status !== "running" ? (
-                      <button className="btn" type="button" onClick={() => runGoal(activeGoal, true)}>
-                        继续当前目标
-                      </button>
-                    ) : null}
-                  </div>
-                </div>
-              </section>
-
-              <section className="panel home-timeline-panel">
-                <div className="panel-head">
-                  <h2>最新动态</h2>
-                  <button className="link-btn" type="button" onClick={() => switchSection("logs")}>
-                    查看日志
-                  </button>
-                </div>
-                <div className="panel-body">
-                  {latestTimeline.length ? (
-                    <div className="home-timeline">
-                      {latestTimeline.map((item, index) => (
-                        <div className={`timeline-item ${item.level}`} key={timelineRenderKey(item, index)}>
-                          <span>{item.time}</span>
-                          <strong>{item.label}</strong>
-                          <p>{safeDisplayText(item.message, 180)}</p>
-                        </div>
-                      ))}
-                    </div>
-                  ) : (
-                    <div className="empty compact">创建目标后，这里会显示最新事件和执行日志。</div>
-                  )}
-                </div>
-              </section>
-
-              {activeGoal && (activeGoal.output || activeGoal.status === "completed") ? (
-                <section className="panel">
-                  <div className="panel-head">
-                    <h2>{activeGoalFailed ? "失败原因" : "最终结果"}</h2>
-                    <span className={`tag ${activeGoalStatus || ""}`}>
-                      {activeGoalFailed ? displayStatus(activeGoal.status) : activeGoal.finalModel || "总指挥"}
-                    </span>
-                  </div>
-                  <div className="panel-body">
-                    {activeGoal.output ? (
-                      <MarkdownOutput content={activeGoal.output} />
-                    ) : (
-                      <div className="empty compact">
-                        目标已结束，但没有收到最终结果内容。请查看执行日志或重新运行当前目标。
-                      </div>
-                    )}
-                  </div>
-                </section>
-              ) : null}
-
-              <section className="dashboard-grid">
-                <article className="panel mini-panel">
-                  <div className="panel-head">
-                    <h2>需要处理</h2>
-                    <button
-                      className="link-btn"
-                      type="button"
-                      onClick={() => switchSection("tasks", { taskTab: "queue" })}
-                    >
-                      查看任务
-                    </button>
-                  </div>
-                  <div className="panel-body">
-                    {attentionTasks.length ? (
-                      <div className="action-list">
-                        {attentionTasks.map((task) => (
-                          <button
-                            className="attention-item"
-                            key={task.id}
-                            type="button"
-                            onClick={() => switchSection("tasks", { taskTab: "queue" })}
-                          >
-                            <span className={`pill ${task.status}`}>{displayStatus(task.status, "任务")}</span>
-                            <strong>{displayTask(task)}</strong>
-                            <small>
-                              {task.blockedReason
-                                ? recoveryReasonLabel(task.blockedReason)
-                                : verificationReasonLabel(array(task.verificationReasons)[0]) ||
-                                  array(task.authenticityWarnings)[0] ||
-                                  "等待处理"}
-                            </small>
-                          </button>
-                        ))}
-                      </div>
-                    ) : (
-                      <div className="empty compact">暂无需要人工处理的风险、失败或阻塞任务。</div>
-                    )}
-                  </div>
-                </article>
-
-                <article className="panel mini-panel">
-                  <div className="panel-head">
-                    <h2>详细视图</h2>
-                    <span className="tag">按需查看</span>
-                  </div>
-                  <div className="panel-body">
-                    <div className="home-detail-grid">
-                      {HOME_DETAIL_LINKS.map(([id, label, icon, desc, taskTab]) => (
-                        <button
-                          className="detail-link-card"
-                          key={`${id}-${taskTab || label}`}
-                          type="button"
-                          onClick={() => switchSection(id, { taskTab })}
-                        >
-                          <span className="material-symbols-outlined">{icon}</span>
-                          <strong>{label}</strong>
-                          <small>{desc}</small>
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                </article>
-              </section>
-            </div>
-
             <div className="app-section agent-chat-section" data-agent-section="chat" hidden={activeSection !== "chat"}>
               <div className="agent-chat-console-grid">
                 <AgentRouteChatPanel
@@ -4003,11 +3571,18 @@ export default function AgentRouteStudio() {
                   modelPools={modelSettings.pools}
                   promptSettings={promptSettings}
                   budgetSettings={budgetSettings}
+                  historyGoals={state.goals}
                   onRoundStart={registerChatGoal}
+                  onRoundStop={markChatGoalStopped}
                   onAgentEvent={(goalId, type, data) => handleStreamEvent(goalId, type, data)}
                 />
                 <aside className="agent-chat-task-pane">
-                  {activeSection === "chat" ? renderTaskWorkspacePanel() : null}
+                  {activeSection === "chat" ? (
+                    <>
+                      {renderChatAttentionPanel()}
+                      {renderTaskWorkspacePanel()}
+                    </>
+                  ) : null}
                 </aside>
               </div>
             </div>
@@ -4023,10 +3598,6 @@ export default function AgentRouteStudio() {
                 onRefreshRecovery={() => refreshRecoveryStatus().catch(() => {})}
                 onRunRecovery={() => runRecoveryScan().catch(() => {})}
               />
-            </div>
-
-            <div className="app-section" data-agent-section="tasks" hidden={activeSection !== "tasks"}>
-              {activeSection === "tasks" ? renderTaskWorkspacePanel() : null}
             </div>
 
             <div className="app-section" data-agent-section="providers" hidden={activeSection !== "providers"}>
@@ -5872,7 +5443,9 @@ function PromptEditor({ label, value, onChange, full = false }) {
 
 function countFor(tasks, filter) {
   if (filter === "all") return tasks.length;
-  if (filter === "queued") return tasks.filter((task) => isWaiting(task.status)).length;
+  if (filter === "queued") return tasks.filter((task) => isQueuedTaskStatus(task.status)).length;
+  if (filter === "needs_evidence")
+    return tasks.filter((task) => String(task.status || "").toLowerCase() === "needs_evidence").length;
   if (filter === "completed") return tasks.filter((task) => isDone(task.status)).length;
   if (filter === "failed") return tasks.filter((task) => isQueueFailedStatus(task.status)).length;
   if (filter === "blocked")
@@ -5890,6 +5463,7 @@ function queueStatusKey(task = {}) {
   }
   if (isDone(status)) return "completed";
   if (status === "running") return "running";
+  if (status === "needs_evidence") return "needs_evidence";
   if (status === "blocked" || dependencyStatus === "blocked") return "blocked";
   if (["canceled", "cancelled"].includes(status)) return "canceled";
   if (["failed", "error"].includes(status)) return "failed";
@@ -6138,6 +5712,7 @@ function taskProgressValue(task = {}) {
   if (isDone(status) || ["failed", "blocked", "canceled", "cancelled"].includes(String(status).toLowerCase()))
     return 100;
   if (status === "running") return 60;
+  if (status === "needs_evidence") return 80;
   if (task.dependencyStatus === "ready") return 20;
   return 0;
 }
@@ -6581,6 +6156,7 @@ function graphStatusKey(task = {}, node = {}, readyIds = new Set()) {
   if (canApproveTask(task) || status === "waiting_human") return "waiting_human";
   if (isDone(status)) return "completed";
   if (status === "running") return "running";
+  if (status === "needs_evidence") return "needs_evidence";
   if (status === "blocked") return "blocked";
   if (["canceled", "cancelled"].includes(status)) return "canceled";
   if (isFailed(status)) return "failed";
@@ -6592,6 +6168,7 @@ function graphStatusKey(task = {}, node = {}, readyIds = new Set()) {
 function graphStatusIcon(status) {
   if (status === "completed") return "check_circle";
   if (status === "running") return "progress_activity";
+  if (status === "needs_evidence") return "fact_check";
   if (status === "blocked") return "pause_circle";
   if (status === "failed") return "cancel";
   if (status === "canceled") return "block";
@@ -6603,6 +6180,7 @@ function graphStatusIcon(status) {
 function graphStatusLabel(status) {
   if (status === "ready") return "可执行";
   if (status === "pending") return "待处理";
+  if (status === "needs_evidence") return "证据不足";
   if (status === "waiting_human") return "等待人工";
   if (status === "canceled") return "已取消";
   return displayStatus(status, valueLabel(status) || "待处理");
@@ -6611,7 +6189,7 @@ function graphStatusLabel(status) {
 function graphStatusTone(status) {
   if (status === "completed") return "done";
   if (status === "running" || status === "ready") return "run";
-  if (status === "blocked") return "blocked";
+  if (status === "blocked" || status === "needs_evidence") return "blocked";
   if (status === "failed") return "fail";
   if (status === "canceled") return "fail";
   if (status === "waiting_human") return "human";
@@ -6855,6 +6433,7 @@ function statusCounts(tasks = []) {
     failed: list.filter((task) =>
       ["failed", "error", "canceled", "cancelled"].includes(String(task.status).toLowerCase())
     ).length,
+    needsEvidence: list.filter((task) => String(task.status).toLowerCase() === "needs_evidence").length,
     pending: list.filter(
       (task) =>
         ["pending", "queued", "waiting"].includes(String(task.status).toLowerCase()) &&
@@ -6912,6 +6491,7 @@ function TaskGraphPanel({
         <GraphStat label="运行中" value={counts.running} tone="run" />
         <GraphStat label="已阻塞" value={counts.blocked || stats?.blocked || 0} tone="blocked" />
         <GraphStat label="失败" value={counts.failed} tone="fail" />
+        <GraphStat label="证据不足" value={counts.needsEvidence} tone="blocked" />
         <GraphStat label="待处理" value={counts.pending} tone="pending" />
       </div>
 
@@ -7120,6 +6700,7 @@ function GraphLegend() {
         ["running", "运行中"],
         ["blocked", "已阻塞"],
         ["failed", "失败"],
+        ["needs_evidence", "证据不足"],
         ["ready", "可执行"],
         ["pending", "待处理"],
         ["waiting_human", "等待人工"]
@@ -7287,6 +6868,7 @@ function dependencyDisplayForId(taskId, visual) {
 function graphReadinessMeta({ statusKey, dependencyStatus, ready }) {
   if (statusKey === "completed") return { className: "ready", label: "执行状态：已完成" };
   if (statusKey === "failed") return { className: "not-ready", label: "执行状态：失败" };
+  if (statusKey === "needs_evidence") return { className: "not-ready", label: "执行状态：证据不足" };
   if (statusKey === "blocked" || dependencyStatus === "blocked")
     return { className: "not-ready", label: "依赖状态：已阻塞" };
   if (statusKey === "waiting_human") return { className: "not-ready", label: "依赖状态：等待人工" };

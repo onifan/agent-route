@@ -32,6 +32,7 @@ function createTask(goalId, task = {}) {
         description: task.description || "Exercise task lifecycle",
         type: task.type || "general",
         modelPool: task.modelPool || "free",
+        toolWorker: task.toolWorker || "",
         difficulty: task.difficulty || "low",
         riskLevel: task.riskLevel || "low",
         successCriteria: task.successCriteria || ["Task finishes"],
@@ -1371,6 +1372,80 @@ function testReadOnlyToolFailureNeedsEvidenceInsteadOfHardFailure() {
   assert.equal(analyze.dependencyStatus, "waiting");
 }
 
+function testPartialReadOnlyLocalEvidenceCompletesAndUnblocksArtifact() {
+  reset();
+  const goalId = "goal-readonly-local-partial";
+  const sourcePath = path.join(os.tmpdir(), `agent-route-readonly-${process.pid}.md`);
+  fs.writeFileSync(sourcePath, "AgentRoute Studio evidence\n");
+  runtime.registerGoalTasks(
+    goalId,
+    [
+      {
+        id: "inspect",
+        title: "Read-only inspect local project",
+        type: "local_execution",
+        modelPool: "codex-cli",
+        toolWorker: "browser",
+        produces: ["project_evidence"],
+        maxAttempts: 1,
+        prompt:
+          "Use only read-only commands such as pwd, ls, find, sed, head and grep. Do not write, install, delete or modify.",
+        successCriteria: ["read-only command evidence is returned", "project evidence is summarized"]
+      },
+      {
+        id: "verify",
+        title: "Verify project evidence",
+        type: "verification",
+        dependsOn: ["inspect"],
+        consumes: ["project_evidence"],
+        successCriteria: ["evidence can be consumed"]
+      }
+    ],
+    { replace: true, source: "test" }
+  );
+  runtime.startTask(goalId, "inspect", { reason: "start" });
+  const completed = runtime.applyWorkerResult(
+    goalId,
+    "inspect",
+    {
+      status: WORKER_OUTCOME.SUCCESS,
+      output: "Read-only inspection collected project structure, package metadata and source excerpts.",
+      actions: ["pwd", "ls", "sed -n"],
+      evidence: {
+        shell: { command: "pwd && ls && sed -n '1,20p' source.md", exitCode: 0, stdout: "ok", stderr: "" },
+        files: [
+          {
+            path: sourcePath,
+            role: "read",
+            exists: true,
+            size: fs.statSync(sourcePath).size,
+            expectedContent: "AgentRoute Studio",
+            expectedContentRequired: false
+          }
+        ],
+        semantic: {
+          outputSummary: "Read-only inspection collected enough project evidence.",
+          addressesCriteria: true,
+          criteriaCoverage: 0.9,
+          qualityScore: 0.9,
+          qualityIssues: ["One exploratory read command had a correctable missing-path note."]
+        }
+      }
+    },
+    { cwd: os.tmpdir() }
+  );
+  assert.equal(completed.status, TASK_STATUS.COMPLETED);
+  assert.equal(completed.verificationStatus, "partially_verified");
+  assert.equal(completed.verified, false);
+  const verify = runtime.getTask(goalId, "verify");
+  assert.equal(verify.dependencyStatus, "ready");
+  assert.deepEqual(
+    runtime.readyTasks(goalId).map((task) => task.id),
+    ["verify"]
+  );
+  fs.rmSync(sourcePath, { force: true });
+}
+
 function testRetryScopeCorrectness() {
   reset();
   const goalId = "goal-retry-scope";
@@ -1948,6 +2023,7 @@ async function main() {
   testVerificationNeedsEvidenceDoesNotBlockDownstream();
   testAlternativeVerifiedEvidenceUnblocksConsumedArtifact();
   testReadOnlyToolFailureNeedsEvidenceInsteadOfHardFailure();
+  testPartialReadOnlyLocalEvidenceCompletesAndUnblocksArtifact();
   testRetryScopeCorrectness();
   testArtifactDependencyValidation();
   testParallelReadyTaskDetection();

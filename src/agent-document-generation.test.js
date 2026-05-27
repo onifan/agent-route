@@ -160,6 +160,27 @@ function testPlannerRoutesDocumentGenerationToDocumentWorker() {
   );
   assert.equal(readOnlyReportPlan.tasks.length, 0);
 
+  const documentsPathReadOnlyPlan = planner.normalizePlan(
+    {
+      tasks: [
+        {
+          id: "inspect-project-files-local",
+          title: "本地只读收集项目结构与关键文件证据",
+          description: "用本地只读方式收集 /Users/liugonghui/Documents/agent route 的目录结构。",
+          type: "document_generate",
+          toolWorker: "document",
+          modelPool: "free",
+          input: "/Users/liugonghui/Documents/agent route",
+          prompt: "只读检查目标目录，输出精简目录树和关键文件证据。不要修改、删除、安装或联网。"
+        }
+      ]
+    },
+    { maxTasks: 3 },
+    [{ role: "user", content: "分析本机/Users/liugonghui/Documents/agent route 的项目，给出项目说明。" }],
+    null
+  );
+  assert.equal(documentsPathReadOnlyPlan.tasks.length, 0);
+
   const ordinaryFinalReportWorker = planner.normalizePlan(
     {
       tasks: [

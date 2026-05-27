@@ -37,6 +37,7 @@ delete process.env.GEMINI_API_KEY;
 delete process.env.GOOGLE_API_KEY;
 
 const agentRoute = require("./agent-route");
+const orchestratorRuntime = require("./agent/orchestrator/runtime");
 const coreRouter = require("./core/router");
 const providerSettings = require("./core/providers");
 const modelRoutingService = require("./agent/orchestrator/model-routing-service");
@@ -724,6 +725,135 @@ async function testModelProxyDoesNotCurlFallbackAfterTimeout() {
   }
 }
 
+async function testModelProxyCancelsUpstreamFetchWhenIncomingRequestAborts() {
+  const previousFetch = global.fetch;
+  const previousUpstream = process.env.AGENT_ROUTE_UPSTREAM_CHAT_URL;
+  const previousKey = process.env.AGENT_ROUTE_UPSTREAM_API_KEY;
+  process.env.AGENT_ROUTE_UPSTREAM_CHAT_URL = "https://example.test/v1/chat/completions";
+  process.env.AGENT_ROUTE_UPSTREAM_API_KEY = "stub-key";
+  let fetchAborted = false;
+  global.fetch = async (url, options = {}) =>
+    new Promise((resolve, reject) => {
+      options.signal.addEventListener(
+        "abort",
+        () => {
+          fetchAborted = true;
+          const error = new Error("aborted");
+          error.name = "AbortError";
+          reject(error);
+        },
+        { once: true }
+      );
+    });
+
+  try {
+    const controller = new AbortController();
+    const incoming = new Request("http://localhost/api/v1/chat/completions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: "gpt-5.5",
+        messages: [{ role: "user", content: "hello" }]
+      }),
+      signal: controller.signal
+    });
+    const pending = coreRouter.handleModelProxy(incoming, { endpointMode: "chat", timeoutMs: 1000 });
+    await Promise.resolve();
+    controller.abort();
+    const response = await pending;
+    assert.equal(response.status, 504);
+    assert.equal(fetchAborted, true);
+  } finally {
+    global.fetch = previousFetch;
+    if (previousUpstream == null) delete process.env.AGENT_ROUTE_UPSTREAM_CHAT_URL;
+    else process.env.AGENT_ROUTE_UPSTREAM_CHAT_URL = previousUpstream;
+    if (previousKey == null) delete process.env.AGENT_ROUTE_UPSTREAM_API_KEY;
+    else process.env.AGENT_ROUTE_UPSTREAM_API_KEY = previousKey;
+  }
+}
+
+async function testCommanderTimeoutAbortsInternalModelRequest() {
+  let requestAborted = false;
+  const attempt = await orchestratorRuntime.callWithFallback({
+    req: request("http://localhost/api/agent-route/ui-stream", { goal: "hello" }),
+    nextHandler: async (upstreamRequest) =>
+      new Promise((resolve) => {
+        upstreamRequest.signal.addEventListener(
+          "abort",
+          () => {
+            requestAborted = true;
+            resolve(
+              new Response(JSON.stringify({ error: { message: "aborted" } }), {
+                status: 504,
+                headers: { "Content-Type": "application/json" }
+              })
+            );
+          },
+          { once: true }
+        );
+      }),
+    baseBody: {},
+    models: ["gpt5.5"],
+    messages: [{ role: "user", content: "hello" }],
+    config: { callTimeoutMs: 5, modelMaxAttempts: 1 },
+    label: "plan",
+    trace: [],
+    endpointMode: "chat",
+    timeoutMsOverride: 5
+  });
+
+  assert.equal(attempt.ok, false);
+  assert.equal(requestAborted, true);
+}
+
+async function testCommanderModelTimeoutRetriesBeforeSurfacing() {
+  let calls = 0;
+  const events = [];
+  const attempt = await orchestratorRuntime.callWithFallback({
+    req: request("http://localhost/api/agent-route/ui-stream", { goal: "hello" }),
+    nextHandler: async () => {
+      calls += 1;
+      return new Response(
+        JSON.stringify({
+          error: {
+            message: "Internal model request timed out.",
+            code: "model_proxy_timeout"
+          }
+        }),
+        {
+          status: 504,
+          headers: { "Content-Type": "application/json" }
+        }
+      );
+    },
+    baseBody: {},
+    models: ["gpt5.5"],
+    messages: [{ role: "user", content: "hello" }],
+    config: { callTimeoutMs: 1000, modelMaxAttempts: 3 },
+    label: "plan",
+    trace: [],
+    endpointMode: "chat",
+    onModelEvent: (event, data) => events.push({ event, data })
+  });
+
+  assert.equal(attempt.ok, false);
+  assert.equal(calls, 3);
+  assert.match(String(attempt.error), /timed out/i);
+  assert.deepEqual(
+    events.map((item) => item.event),
+    [
+      "model_attempt",
+      "model_timeout",
+      "model_retry",
+      "model_attempt",
+      "model_timeout",
+      "model_retry",
+      "model_attempt",
+      "model_timeout"
+    ]
+  );
+}
+
 async function testModelProxyDoesNotForceAcceptHeaderForNonStreamingChat() {
   const previousFetch = global.fetch;
   const previousUpstream = process.env.AGENT_ROUTE_UPSTREAM_CHAT_URL;
@@ -1096,6 +1226,9 @@ async function run() {
     await testOutboundProxyEnvAppliesToConfiguredModelFetch();
     await testModelProxySurfacesFetchFailureWithoutCurlFallback();
     await testModelProxyDoesNotCurlFallbackAfterTimeout();
+    await testModelProxyCancelsUpstreamFetchWhenIncomingRequestAborts();
+    await testCommanderTimeoutAbortsInternalModelRequest();
+    await testCommanderModelTimeoutRetriesBeforeSurfacing();
     await testModelProxyDoesNotForceAcceptHeaderForNonStreamingChat();
     await testProviderSettingsActionSavesWithoutLeakingKey();
     await testAgentRouteStopsWhenCommanderCannotPlan();

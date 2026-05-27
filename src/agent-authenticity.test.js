@@ -319,6 +319,51 @@ function testFileEvidenceDoesNotTriggerBrowserUrlRequirement() {
   assert.notEqual(result.suggestedNextState, verification.SUGGESTED_NEXT_STATE.BLOCKED);
 }
 
+function testObservedCountsDoNotBecomeExpectedListCounts() {
+  const result = verification.verifyTaskResult(
+    {
+      id: "repo-inventory",
+      title: "只读盘点项目文件清单",
+      type: "local_execution",
+      modelPool: "codex-cli",
+      successCriteria: ["返回关键文件清单"],
+      attempts: 0,
+      maxAttempts: 1
+    },
+    {
+      status: "success",
+      output: [
+        "结果：只读扫描统计到 39 个文件，以下是核心摘要。",
+        "- package.json: 项目依赖和脚本",
+        "- src/agent/orchestrator/runtime.js: 编排入口"
+      ].join("\n"),
+      actions: ["read project files"],
+      evidence: {
+        provided: true,
+        summary: "Read-only file inventory with observed file count.",
+        shell: {
+          command: "find . -type f | wc -l",
+          exitCode: 0,
+          stdout: "39",
+          stderr: ""
+        },
+        semantic: {
+          outputSummary: "The worker reported an observed repository file count and key files.",
+          addressesCriteria: true,
+          criteriaCoverage: 1,
+          qualityScore: 0.95
+        }
+      }
+    },
+    { cwd: testRoot }
+  );
+  assert.equal(
+    result.authenticityWarnings.some((warning) => /expected 39/i.test(warning)),
+    false
+  );
+  assert.notEqual(result.decisionSource, "authenticity");
+}
+
 async function testAuthenticityStatusAction() {
   taskRuntime.resetRuntime();
   taskRuntime.registerGoalTasks("authenticity-visual-goal", [listTask()], {
@@ -366,6 +411,7 @@ async function main() {
   testWebEvidenceDoesNotUseProposalAuthenticity();
   testPlanningActionMentionsBrowserButDoesNotRequireBrowserEvidence();
   testFileEvidenceDoesNotTriggerBrowserUrlRequirement();
+  testObservedCountsDoNotBecomeExpectedListCounts();
   await testAuthenticityStatusAction();
   console.log("agent authenticity tests passed");
 }

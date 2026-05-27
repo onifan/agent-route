@@ -329,8 +329,13 @@ function explicitFileClaimText(task = {}, workerResult = {}) {
 
 function hasExplicitFileOutputClaim(task = {}, workerResult = {}) {
   const text = explicitFileClaimText(task, workerResult);
-  return /(?:file path|saved to|written to|created file|generated file|updated file|artifact path|文件路径|保存到|写入到|创建文件|生成文件|更新文件|文件产物|报告文件|文档文件|\.pdf|\.docx|\.md|\.html?|\.txt)/i.test(
-    text
+  return (
+    /(?:file path|saved to|written to|created file|generated file|updated file|artifact path|文件路径|保存到|写入到|创建文件|生成文件|更新文件|文件产物|报告文件|文档文件)/i.test(
+      text
+    ) ||
+    /(?:write|generate|create|save|export|render|update|输出|生成|创建|保存|导出|渲染|写入|更新)[^。.;\n]{0,100}(?:file|artifact|document|\.pdf|\.docx|\.md|\.html?|\.txt|文件|产物|文档)/i.test(
+      text
+    )
   );
 }
 
@@ -463,6 +468,8 @@ function evidenceRequirementKind(task = {}, workerResult = {}) {
   const type = String(task.type || "").toLowerCase();
   const toolWorker = String(task.toolWorker || task.tool_worker || "").toLowerCase();
   const model = String(workerResult.model || workerResult.context?.model || "").toLowerCase();
+  if (/shell|terminal|local_execution/.test(type) || String(task.modelPool || "").toLowerCase() === "codex-cli")
+    return "shell_execution";
   if (
     toolWorker === "web" ||
     model === "web-tool" ||
@@ -472,8 +479,6 @@ function evidenceRequirementKind(task = {}, workerResult = {}) {
   if (toolWorker === "document" || /document|docx|pdf|markdown|html_document|artifact/.test(type))
     return "file_artifact";
   if (/browser/.test(type) || toolWorker === "browser") return "browser_observation";
-  if (/shell|terminal|local_execution/.test(type) || String(task.modelPool || "").toLowerCase() === "codex-cli")
-    return "shell_execution";
   return "semantic_evidence";
 }
 
@@ -631,16 +636,34 @@ function fileRole(file = {}) {
   ).toLowerCase();
 }
 
-function fileHasObservedWrite(file = {}) {
-  const beforeSize = Number(file.beforeSize ?? file.before_size ?? NaN);
-  const afterSize = Number(file.afterSize ?? file.after_size ?? NaN);
-  const beforeHash = String(file.beforeHash || file.before_hash || "");
-  const afterHash = String(file.afterHash || file.after_hash || "");
-  if (Number.isFinite(beforeSize) && Number.isFinite(afterSize) && beforeSize !== afterSize) return true;
-  if (beforeHash && afterHash && beforeHash !== afterHash) return true;
-  return /write|create|created|generated|render|rendered|save|saved|export|output|artifact|document|写入|创建|生成|保存|导出|渲染|产物|文档/.test(
+function fileRoleIndicatesMutation(file = {}) {
+  return /write|create|created|generated|render|rendered|save|saved|export|output|artifact|document|modified|updated|写入|创建|生成|保存|导出|渲染|产物|文档|修改|更新/.test(
     fileRole(file)
   );
+}
+
+function fileRoleIndicatesReadOnly(file = {}) {
+  return /read|readonly|read_only|inspect|inspection|stat|metadata|inventory|source|reference|observe|observation|读取|只读|查看|检查|盘点|元数据|清单|来源|参考|观察/.test(
+    fileRole(file)
+  );
+}
+
+function fileHasObservedSizeChange(file = {}) {
+  const beforeSize = Number(file.beforeSize ?? file.before_size ?? NaN);
+  const afterSize = Number(file.afterSize ?? file.after_size ?? NaN);
+  if (!Number.isFinite(beforeSize) || !Number.isFinite(afterSize) || beforeSize === afterSize) return false;
+  if (fileRoleIndicatesMutation(file)) return true;
+  if (fileRoleIndicatesReadOnly(file)) return false;
+  if (beforeSize <= 0 && !file.beforeHash && !file.before_hash) return false;
+  return true;
+}
+
+function fileHasObservedWrite(file = {}) {
+  const beforeHash = String(file.beforeHash || file.before_hash || "");
+  const afterHash = String(file.afterHash || file.after_hash || "");
+  if (beforeHash && afterHash && beforeHash !== afterHash) return true;
+  if (fileHasObservedSizeChange(file)) return true;
+  return fileRoleIndicatesMutation(file);
 }
 
 function shouldVerifyExpectedFileContent(file = {}, { documentOutput = false, expectsFile = false } = {}) {
@@ -649,6 +672,7 @@ function shouldVerifyExpectedFileContent(file = {}, { documentOutput = false, ex
   if (documentOutput) return true;
   if (file.expectedContentRequired || file.expected_content_required || file.verifyContent || file.verify_content)
     return true;
+  if (fileRoleIndicatesReadOnly(file)) return false;
   if (/artifact|output|generated|created|written|document|产物|输出|生成|创建|写入|文档/.test(fileRole(file)))
     return true;
   return Boolean(expectsFile && fileHasObservedWrite(file));
@@ -719,9 +743,7 @@ function evaluateFileVerification(state, task = {}, workerResult = {}, context =
           );
         }
       }
-      const beforeSize = Number(file.beforeSize ?? file.before_size ?? NaN);
-      const afterSize = Number(file.afterSize ?? file.after_size ?? size);
-      if (Number.isFinite(beforeSize) && Number.isFinite(afterSize) && beforeSize !== afterSize) {
+      if (fileHasObservedSizeChange(file)) {
         addReason(state, `Verified file size changed: ${file.path}`, 0.14);
       }
       const expectedContentObject =
@@ -1271,33 +1293,6 @@ function responseBodyLooksLikeFailure(body = "", readOnlyWebTool = false) {
   );
 }
 
-function responseBodyLooksLikePlaceholderEvidence(body = "", task = {}) {
-  const text = collapseText(body);
-  if (!text) return false;
-  const taskContext = collapseText(
-    [
-      task.title,
-      task.description,
-      task.prompt,
-      Array.isArray(task.successCriteria) ? task.successCriteria.join(" ") : "",
-      text.slice(0, 800)
-    ].join(" ")
-  );
-  const marketDataContext =
-    /yield|bond|rate|spread|swap|price|quote|currency|exchange|central bank|inflation|cpi|收益率|国债|债券|利率|汇率|央行|通胀/i.test(
-      taskContext
-    );
-  if (!marketDataContext) return false;
-  return (
-    /(?:yield|rate|spread|swap|price|quote|default swap|central bank rate|gov\.?bond)[^:]{0,120}:\s*(?:-\.---|--+\.--|--+|-{2,})\s*(?:%|bp)?/i.test(
-      text
-    ) ||
-    /currently offers a yield of\s*-\.---\s*%/i.test(text) ||
-    /last update:\s*--\s*---\s*----/i.test(text) ||
-    /\b(?:s&p rating|central bank rate|credit default swap)\s*:\s*----/i.test(text)
-  );
-}
-
 function evaluateApiVerification(state, task = {}, workerResult = {}, context = {}) {
   const responses = [
     ...(workerResult.evidence && Array.isArray(workerResult.evidence.apiResponses)
@@ -1327,10 +1322,7 @@ function evaluateApiVerification(state, task = {}, workerResult = {}, context = 
       Number.isFinite(status) &&
       status >= 200 &&
       status < 300 &&
-      !(
-        readOnlyWebTool &&
-        (responseBodyLooksLikeFailure(body, true) || responseBodyLooksLikePlaceholderEvidence(body, task))
-      )
+      !(readOnlyWebTool && responseBodyLooksLikeFailure(body, true))
     );
   });
   for (const response of responses) {
@@ -1355,15 +1347,6 @@ function evaluateApiVerification(state, task = {}, workerResult = {}, context = 
     }
     if (responseBodyLooksLikeFailure(body, readOnlyWebTool))
       addIssue(state, "API response body contains failure text.", "high", true, 0.2);
-    if (readOnlyWebTool && responseBodyLooksLikePlaceholderEvidence(body, task)) {
-      addIssue(
-        state,
-        "API/web response body contains placeholder market data instead of usable values.",
-        "high",
-        true,
-        0.24
-      );
-    }
     if (response.writeConfirmed || response.persisted || response.createdId || response.updatedId)
       addReason(state, "API write was confirmed by response metadata.", 0.18);
   }
@@ -1390,8 +1373,7 @@ function evaluateSemanticVerification(state, task = {}, workerResult = {}) {
         Number.isFinite(status) &&
         status >= 200 &&
         status < 300 &&
-        !responseBodyLooksLikeFailure(body, true) &&
-        !responseBodyLooksLikePlaceholderEvidence(body, task)
+        !responseBodyLooksLikeFailure(body, true)
       );
     });
   if (error) addIssue(state, `Worker returned error text: ${error.slice(0, 180)}`, "high", true, 0.24);
@@ -1493,6 +1475,40 @@ function isReadOnlyBrowserTask(task = {}, workerResult = {}) {
   );
 }
 
+function stripNegatedMutationText(value = "") {
+  return String(value || "").replace(
+    /(?:不要|不允许|禁止|不得|请勿|do not|don't|never|without|no)[^。.;\n]*(?:写入|创建|保存|导出|删除|安装|修改|更新|write|create|save|export|delete|install|modify|update)[^。.;\n]*/gi,
+    " "
+  );
+}
+
+function isReadOnlyLocalEvidenceTask(task = {}, workerResult = {}) {
+  const type = String(task.type || task.taskType || "").toLowerCase();
+  const modelPool = String(task.modelPool || task.model_pool || workerResult.context?.model || "").toLowerCase();
+  if (!(/^(local_execution|shell|terminal|command)$/.test(type) || modelPool === "codex-cli")) return false;
+  const text = [
+    task.title,
+    task.description,
+    task.prompt,
+    task.input,
+    workerResult.output,
+    ...(Array.isArray(task.successCriteria) ? task.successCriteria : [])
+  ]
+    .filter(Boolean)
+    .join("\n")
+    .toLowerCase();
+  if (!/(read[-\s]?only|inspect|list|cat|sed|head|grep|pwd|ls|find|wc|只读|读取|查看|检查|摘录|证据)/i.test(text))
+    return false;
+  const withoutNegatedMutations = stripNegatedMutationText(text);
+  return !/(write|create|save|export|delete|install|modify|update|run dev|start server|npm install|pnpm install|yarn install|写入|创建|保存|导出|删除|安装|修改|更新|启动服务)/i.test(
+    withoutNegatedMutations
+  );
+}
+
+function isReadOnlyEvidenceTask(task = {}, workerResult = {}) {
+  return isReadOnlyBrowserTask(task, workerResult) || isReadOnlyLocalEvidenceTask(task, workerResult);
+}
+
 function finalizeVerification(state, task = {}, workerResult = {}, context = {}) {
   const issueSeverity = maxIssueSeverity(state.detectedIssues);
   const confidence = Math.max(0, Math.min(1, Number(state.confidence.toFixed(2))));
@@ -1547,8 +1563,8 @@ function finalizeVerification(state, task = {}, workerResult = {}, context = {})
     retryable = false;
   } else if (
     verificationStatus === VERIFICATION_STATUS.PARTIALLY_VERIFIED &&
-    isReadOnlyBrowserTask(task, workerResult) &&
-    !state.detectedIssues.length
+    isReadOnlyEvidenceTask(task, workerResult) &&
+    !seriousIssue
   ) {
     suggestedNextState = SUGGESTED_NEXT_STATE.COMPLETED;
     retryable = false;

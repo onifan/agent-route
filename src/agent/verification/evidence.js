@@ -150,11 +150,22 @@ function normalizeFileEvidence(raw) {
   const normalized = prune({
     path: safeString(firstDefined(item.path, item.file, item.filename, item.target), 800),
     exists: toBoolean(item.exists),
+    size: toNumber(item.size),
     beforeSize: toNumber(firstDefined(item.beforeSize, item.before_size)),
     afterSize: toNumber(firstDefined(item.afterSize, item.after_size, item.size)),
     beforeHash: safeString(firstDefined(item.beforeHash, item.before_hash), 160),
     afterHash: safeString(firstDefined(item.afterHash, item.after_hash, item.hash), 160),
     ...expected,
+    evidenceRole: safeString(firstDefined(item.evidenceRole, item.evidence_role, item.role, item.kind), 80),
+    expectedContentRequired: toBoolean(
+      firstDefined(
+        item.expectedContentRequired,
+        item.expected_content_required,
+        item.verifyContent,
+        item.verify_content
+      )
+    ),
+    verifyContent: toBoolean(firstDefined(item.verifyContent, item.verify_content)),
     changeType: safeString(firstDefined(item.changeType, item.change_type, item.operation), 80),
     deleted: toBoolean(item.deleted),
     expected: item.expected === undefined ? undefined : toBoolean(item.expected),

@@ -26,7 +26,7 @@ function extractPublicHttpUrl(value = "") {
 function extractPublicHttpUrls(value = "", limit = 5) {
   const seen = new Set();
   const urls = [];
-  const matches = String(value || "").match(/\bhttps?:\/\/[^\s"'<>()[\]{}]+/gi) || [];
+  const matches = String(value || "").match(/\bhttps?:\/\/[^\s"'<>()[\]{}，。；、！？：]+/gi) || [];
   for (const match of matches) {
     const url = cleanUrl(match);
     const key = url.toLowerCase();

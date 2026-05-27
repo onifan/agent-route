@@ -57,8 +57,27 @@ function pruneDanglingDependencyTasks(tasks = [], existingTasks = []) {
   };
 }
 
+function artifactIds(value = []) {
+  const raw = Array.isArray(value) ? value : String(value || "").split(/[\s,]+/);
+  const ids = [];
+  const seen = new Set();
+  for (const item of raw || []) {
+    const id =
+      typeof item === "string"
+        ? item
+        : item && typeof item === "object"
+          ? item.id || item.type || item.path || item.name || ""
+          : "";
+    const text = String(id || "").trim();
+    if (!text || seen.has(text)) continue;
+    seen.add(text);
+    ids.push(text);
+  }
+  return ids;
+}
+
 function taskEvidenceCategories(task = {}) {
-  return (task.produces || task.outputs || [])
+  return artifactIds(task.produces || task.outputs || [])
     .map((item) => (typeof item === "string" ? item : item && (item.id || item.type || item.path)))
     .map((item) => String(item || "").trim())
     .filter(Boolean)
@@ -219,6 +238,53 @@ function filterDuplicateSourceTasks(tasks = [], existingTasks = []) {
   return { tasks: kept, pruned };
 }
 
+function normalizeLogicalTaskTitle(value = "") {
+  return String(value || "")
+    .toLowerCase()
+    .replace(/[（(]\s*\d+\s*[）)]$/g, "")
+    .replace(/\s+(?:#?\d+|[一二三四五六七八九十]+)$/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function producedArtifactKey(task = {}) {
+  return artifactIds(task.produces || task.outputs || task.producedArtifacts || task.produced_artifacts || [])
+    .map((item) => item.toLowerCase())
+    .sort()
+    .join(",");
+}
+
+function logicalTaskKey(task = {}, options = {}) {
+  const title = normalizeLogicalTaskTitle(task.title || task.description || "");
+  if (title.length < 6) return "";
+  const toolWorker = String(task.toolWorker || task.tool_worker || "").toLowerCase();
+  const type = isWebToolTask(task)
+    ? webToolTypeFamily(webTaskTypeFor(task))
+    : String(task.type || task.taskType || "general").toLowerCase();
+  const sourceKey = options.ignoreSourceKey ? "" : readSourceKey(task);
+  return [toolWorker || "model", type || "general", title, producedArtifactKey(task), sourceKey].join("|");
+}
+
+function filterDuplicateLogicalTasks(tasks = [], existingTasks = [], options = {}) {
+  const seen = new Map();
+  for (const task of existingTasks || []) {
+    const key = logicalTaskKey(task, options);
+    if (key && !seen.has(key)) seen.set(key, task);
+  }
+  const kept = [];
+  const pruned = [];
+  for (const task of tasks || []) {
+    const key = logicalTaskKey(task, options);
+    if (key && seen.has(key)) {
+      pruned.push({ task, duplicateKey: key, existingTask: seen.get(key) });
+      continue;
+    }
+    if (key) seen.set(key, task);
+    kept.push(task);
+  }
+  return { tasks: kept, pruned };
+}
+
 function isWebToolTask(task = {}) {
   const type = String(task.type || task.taskType || "").toLowerCase();
   const toolWorker = String(task.toolWorker || task.tool_worker || "").toLowerCase();
@@ -257,9 +323,9 @@ function hasDocumentFileOutputIntent(value = "") {
   const hasOutputVerb = /生成|创建|输出|保存|导出|写成|制作|渲染|create|generate|write|save|export|render|produce/.test(
     text
   );
-  const hasDocumentTarget = /文档|报告文件|文档文件|产物|artifact|document|pdf|docx|word|markdown|html|txt|text/.test(
-    text
-  );
+  const hasDocumentTarget =
+    /文档|报告文件|文档文件|产物/.test(text) ||
+    /\b(?:artifact|document|pdf|docx|word|markdown|html|txt|text)\b/.test(text);
   return hasOutputVerb && hasDocumentTarget;
 }
 
@@ -343,6 +409,18 @@ function normalizeAppenderTask(task = {}) {
     if (!normalized.produces && !normalized.outputs) normalized.produces = ["web_evidence"];
   }
   return normalized;
+}
+
+function retargetProducedArtifacts(task = {}) {
+  const rawProduces = task.produces || task.outputs || task.producedArtifacts || task.produced_artifacts;
+  if (!Array.isArray(rawProduces) || !rawProduces.length || !task.id) return task;
+  return {
+    ...task,
+    produces: dependencyEngine.normalizeArtifacts(rawProduces, task.id).map((artifact) => ({
+      ...artifact,
+      taskId: task.id
+    }))
+  };
 }
 
 function createTaskAppender({
@@ -446,6 +524,31 @@ function createTaskAppender({
       blocked_tasks: []
     });
   };
+  const emitDuplicateLogicalTasks = (filtered, source) => {
+    if (!filtered.pruned.length) return;
+    trace.push({
+      label: `logical-dedupe:${source}`,
+      model: "task-appender",
+      ok: true,
+      pruned: filtered.pruned.map((item) => ({
+        taskId: item.task.id,
+        duplicateKey: item.duplicateKey,
+        existingTaskId: item.existingTask && item.existingTask.id
+      }))
+    });
+    emitStrategy(strategyEngine.STRATEGY_EVENT.PLAN_CONSTRAINED, {
+      source,
+      violations: filtered.pruned.map((item) => ({
+        code: "duplicate_logical_task",
+        severity: "low",
+        message: "Skipped duplicate task because the same tool/type/title/output target is already in the graph.",
+        taskId: item.task.id,
+        taskTitle: item.task.title
+      })),
+      inserted_approval_tasks: [],
+      blocked_tasks: []
+    });
+  };
   return function appendTasks(tasks, sourceOptions = "planner") {
     const appendOptions =
       sourceOptions && typeof sourceOptions === "object"
@@ -454,21 +557,29 @@ function createTaskAppender({
     const source = String(appendOptions.source || "planner");
     const currentTasks = taskRuntime.listTasks(goalId);
     const existingTasks = currentTasks.length ? currentTasks : allTasks;
-    const splitReadTasks = splitMultiUrlReadTasks(tasks || []);
+    const shouldSplitReadTasks =
+      appendOptions.splitMultiUrlReadTasks !== false && source !== "review" && source !== "commander";
+    const splitReadTasks = shouldSplitReadTasks
+      ? splitMultiUrlReadTasks(tasks || [])
+      : { tasks: tasks || [], split: [] };
     emitSplitReadTasks(splitReadTasks.split, source);
     const prepared = [];
     for (const rawTask of splitReadTasks.tasks || []) {
-      const task = {
+      const task = retargetProducedArtifacts({
         ...normalizeAppenderTask(rawTask),
         id: makeTaskId(rawTask.id || rawTask.title, knownTaskIds)
-      };
+      });
       prepared.push(task);
     }
     const executable = filterNonExecutableSynthesisTasks(prepared, { goalText: goalMemoryQuery });
     emitPrunedSynthesisTasks(executable, source);
     const sourceDeduped = filterDuplicateSourceTasks(executable.tasks, existingTasks);
     emitDuplicateSourceTasks(sourceDeduped, source);
-    const initiallyDeduped = filterRedundantVerifiedTasks(sourceDeduped.tasks, existingTasks);
+    const logicalDeduped = filterDuplicateLogicalTasks(sourceDeduped.tasks, existingTasks, {
+      ignoreSourceKey: appendOptions.ignoreLogicalSourceKey === true || source === "review" || source === "commander"
+    });
+    emitDuplicateLogicalTasks(logicalDeduped, source);
+    const initiallyDeduped = filterRedundantVerifiedTasks(logicalDeduped.tasks, existingTasks);
     emitDedupedTasks(initiallyDeduped, source);
     const goalStrategy = typeof getGoalStrategy === "function" ? getGoalStrategy() : null;
     const graphExpanded = goalStrategy
@@ -555,6 +666,7 @@ function createTaskAppender({
 module.exports = {
   createTaskAppender,
   filterDuplicateSourceTasks,
+  filterDuplicateLogicalTasks,
   filterNonExecutableSynthesisTasks,
   filterRedundantVerifiedTasks,
   hasFileWriteProhibition,

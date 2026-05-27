@@ -33,6 +33,7 @@ function testCodexResultAndLogFilter() {
   assert.equal(codexCliTool.shouldForwardCodexLog({ stream: "stdout", text: "visible" }), true);
   assert.equal(codexCliTool.shouldForwardCodexLog({ stream: "stderr", text: "debug noise" }), false);
   assert.equal(codexCliTool.shouldForwardCodexLog({ stream: "stderr", text: "STATUS: running" }), true);
+  assert.equal(codexCliTool.shouldForwardCodexLog({ stream: "stderr", text: "ERROR: usage limit" }), true);
   assert.equal(codexCliRunner.runCodexCli, codexCliTool.runCodexCli);
 }
 
@@ -62,6 +63,7 @@ function testCodexUsageLimitIsSurfacedFromStderr() {
   });
   assert.equal(result.ok, false);
   assert.match(result.error, /usage limit/i);
+  assert.match(result.content, /usage limit/i);
   assert.doesNotMatch(result.error, /<html>/i);
 }
 
@@ -228,27 +230,34 @@ async function testWebToolReturnsEvidenceAndBlocksPrivateTargets() {
   assert.equal(blocked.requiredApproval, true);
 }
 
-async function testWebToolDefaultsToFetchTransportWhenAvailable() {
+async function testWebToolDefaultsToSingleCurlTransport() {
   const previousTransport = process.env.AGENT_ROUTE_WEB_TRANSPORT;
   const previousFetch = global.fetch;
   delete process.env.AGENT_ROUTE_WEB_TRANSPORT;
-  let called = false;
-  global.fetch = async (url) => {
-    called = true;
-    assert.match(String(url), /example\.test\/default-transport/);
-    return new Response(
-      "<html><head><title>Default Fetch</title></head><body>Readable default transport.</body></html>",
-      {
-        status: 200,
-        headers: { "Content-Type": "text/html" }
-      }
-    );
+  let fetchCalled = false;
+  let curlCalled = false;
+  global.fetch = async () => {
+    fetchCalled = true;
+    throw new Error("default transport should not use fetch");
   };
   try {
-    const fetched = await webTool.fetchWebUrl("https://example.test/default-transport");
-    assert.equal(called, true);
+    const fetched = await webTool.fetchWebUrl("https://example.test/default-transport", {
+      curlImpl: async (command, args) => {
+        curlCalled = true;
+        assert.equal(command, "curl");
+        assert.ok(args.includes("https://example.test/default-transport"));
+        const headerPath = args[args.indexOf("--dump-header") + 1];
+        fs.writeFileSync(headerPath, "HTTP/2 200 OK\r\ncontent-type: text/html\r\n\r\n");
+        return {
+          stdout: "<html><head><title>Default Curl</title></head><body>Readable default transport.</body></html>",
+          stderr: ""
+        };
+      }
+    });
+    assert.equal(curlCalled, true);
+    assert.equal(fetchCalled, false);
     assert.equal(fetched.ok, true);
-    assert.match(fetched.title, /Default Fetch/);
+    assert.match(fetched.title, /Default Curl/);
   } finally {
     global.fetch = previousFetch;
     if (previousTransport == null) delete process.env.AGENT_ROUTE_WEB_TRANSPORT;
@@ -256,28 +265,22 @@ async function testWebToolDefaultsToFetchTransportWhenAvailable() {
   }
 }
 
-async function testWebToolUsesCurlTransportAfterFetchNetworkFailure() {
+async function testWebToolSurfacesFetchNetworkFailureWithoutTransportFallback() {
+  let curlCalled = false;
   const fetched = await webTool.fetchWebUrl("https://example.test/failover", {
     transport: "fetch",
     fetchImpl: async () => {
       throw new Error("synthetic fetch network failure");
     },
-    curlImpl: async (command, args) => {
-      assert.equal(command, "curl");
-      assert.ok(args.includes("https://example.test/failover"));
-      const headerPath = args[args.indexOf("--dump-header") + 1];
-      fs.writeFileSync(headerPath, "HTTP/2 200 OK\r\ncontent-type: text/html\r\n\r\n");
-      return {
-        stdout:
-          "<html><head><title>Transport Failover</title></head><body>Readable evidence through alternate transport.</body></html>",
-        stderr: ""
-      };
+    curlImpl: async () => {
+      curlCalled = true;
+      throw new Error("curl should not be reached");
     }
   });
-  assert.equal(fetched.ok, true);
-  assert.equal(fetched.status, 200);
-  assert.match(fetched.title, /Transport Failover/);
-  assert.match(fetched.textPreview, /Readable evidence through alternate transport/);
+  assert.equal(fetched.ok, false);
+  assert.equal(fetched.status, 0);
+  assert.equal(curlCalled, false);
+  assert.match(fetched.error, /fetch transport failed: synthetic fetch network failure/);
 }
 
 async function testWebSearchFetchesResultPagesForEvidence() {
@@ -435,6 +438,166 @@ function testWebSearchParsesBingRedirectResultLinks() {
   assert.equal(results[0].url, target);
   assert.equal(results[0].title, "Generic Market Evidence");
   assert.match(results[0].snippet, /Readable public evidence/);
+}
+
+async function testWebSearchSkipsDictionaryResultsForNonDictionaryQueries() {
+  const previousFetch = global.fetch;
+  let dictionaryFetched = false;
+  let lowRelevanceFetched = false;
+  let partialRelevanceFetched = false;
+  let mismatchedIdentifierFetched = false;
+  global.fetch = async (url) => {
+    const target = String(url);
+    if (target.includes("bing.com/search")) {
+      return new Response(
+        [
+          "<html><body>",
+          '<li class="b_algo"><h2><a href="https://dictionary.example/latest">latest 是什么意思</a></h2><p>translation and pronunciation page.</p></li>',
+          '<li class="b_algo"><h2><a href="https://baike.example/item/latest">latest _百科</a></h2><p>generic encyclopedia page about the word latest.</p></li>',
+          '<li class="b_algo"><h2><a href="https://travel.example/japan">About Japan</a></h2><p>Tourism and geography guide.</p></li>',
+          '<li class="b_algo"><h2><a href="https://finance.example/usd-cny">USD to CNY exchange rate</a></h2><p>Public quote for the wrong pair.</p></li>',
+          '<li class="b_algo"><h2><a href="https://finance.example/usd-jpy">USD JPY exchange rate</a></h2><p>Public market quote evidence.</p></li>',
+          "</body></html>"
+        ].join(""),
+        { status: 200, headers: { "Content-Type": "text/html" } }
+      );
+    }
+    if (target.includes("dictionary.example")) {
+      dictionaryFetched = true;
+      return new Response("<html><title>Dictionary</title><body>translation page</body></html>", {
+        status: 200,
+        headers: { "Content-Type": "text/html" }
+      });
+    }
+    if (target.includes("baike.example")) {
+      lowRelevanceFetched = true;
+      return new Response("<html><title>latest</title><body>generic encyclopedia page</body></html>", {
+        status: 200,
+        headers: { "Content-Type": "text/html" }
+      });
+    }
+    if (target.includes("travel.example")) {
+      partialRelevanceFetched = true;
+      return new Response("<html><title>About Japan</title><body>tourism guide</body></html>", {
+        status: 200,
+        headers: { "Content-Type": "text/html" }
+      });
+    }
+    if (target.includes("finance.example/usd-cny")) {
+      mismatchedIdentifierFetched = true;
+      return new Response("<html><title>USD CNY</title><body>wrong currency pair</body></html>", {
+        status: 200,
+        headers: { "Content-Type": "text/html" }
+      });
+    }
+    if (target.includes("finance.example/usd-jpy")) {
+      return new Response(
+        "<html><head><title>USD JPY exchange rate</title></head><body>USD/JPY exchange rate public quote evidence.</body></html>",
+        { status: 200, headers: { "Content-Type": "text/html" } }
+      );
+    }
+    throw new Error(`unexpected fetch ${target}`);
+  };
+  try {
+    const searched = await webTool.searchWeb("USD JPY exchange rate", {
+      limit: 5,
+      resultFetchLimit: 1,
+      searchProvider: "bing-html"
+    });
+    assert.equal(searched.ok, true);
+    assert.equal(dictionaryFetched, false);
+    assert.equal(lowRelevanceFetched, false);
+    assert.equal(partialRelevanceFetched, false);
+    assert.equal(mismatchedIdentifierFetched, false);
+    assert.equal(searched.results[0].url, "https://finance.example/usd-jpy");
+    assert.match(searched.textPreview, /USD JPY exchange rate/);
+  } finally {
+    global.fetch = previousFetch;
+  }
+}
+
+async function testWebSearchRejectsSingleTokenCountryMatchesForSpecificQueries() {
+  const previousFetch = global.fetch;
+  let travelFetched = false;
+  global.fetch = async (url) => {
+    const target = String(url);
+    if (target.includes("bing.com/search")) {
+      return new Response(
+        [
+          "<html><body>",
+          '<li class="b_algo"><h2><a href="https://travel.example/japan">About Japan</a></h2><p>Travel and geography guide.</p></li>',
+          '<li class="b_algo"><h2><a href="https://market.example/japan-bond-yield">Japan government bond yield</a></h2><p>Public bond yield market evidence.</p></li>',
+          "</body></html>"
+        ].join(""),
+        { status: 200, headers: { "Content-Type": "text/html" } }
+      );
+    }
+    if (target.includes("travel.example")) {
+      travelFetched = true;
+      return new Response("<html><title>About Japan</title><body>travel guide</body></html>", {
+        status: 200,
+        headers: { "Content-Type": "text/html" }
+      });
+    }
+    if (target.includes("market.example/japan-bond-yield")) {
+      return new Response(
+        "<html><head><title>Japan government bond yield</title></head><body>Japan 10 year government bond yield public quote evidence.</body></html>",
+        { status: 200, headers: { "Content-Type": "text/html" } }
+      );
+    }
+    throw new Error(`unexpected fetch ${target}`);
+  };
+  try {
+    const searched = await webTool.searchWeb("Japan government bond yield", {
+      limit: 2,
+      resultFetchLimit: 1,
+      searchProvider: "bing-html"
+    });
+    assert.equal(searched.ok, true);
+    assert.equal(travelFetched, false);
+    assert.equal(searched.results[0].url, "https://market.example/japan-bond-yield");
+  } finally {
+    global.fetch = previousFetch;
+  }
+}
+
+async function testWebSearchReturnsLowConfidenceParsedResultsForVerifier() {
+  const previousFetch = global.fetch;
+  let candidateFetched = false;
+  global.fetch = async (url) => {
+    const target = String(url);
+    if (target.includes("bing.com/search")) {
+      return new Response(
+        [
+          "<html><body>",
+          '<li class="b_algo"><h2><a href="https://finance.example/dollar-yen">Dollar Yen spot rate</a></h2><p>Exchange rate quote for the Japanese yen.</p></li>',
+          "</body></html>"
+        ].join(""),
+        { status: 200, headers: { "Content-Type": "text/html" } }
+      );
+    }
+    if (target === "https://finance.example/dollar-yen") {
+      candidateFetched = true;
+      return new Response(
+        "<html><head><title>Dollar Yen spot rate</title></head><body>Dollar to yen exchange rate quote 156.20 from public market data.</body></html>",
+        { status: 200, headers: { "Content-Type": "text/html" } }
+      );
+    }
+    throw new Error(`unexpected fetch ${target}`);
+  };
+  try {
+    const searched = await webTool.searchWeb("USD/JPY exchange rate 2026-05-26", {
+      limit: 1,
+      resultFetchLimit: 1,
+      searchProvider: "bing-html"
+    });
+    assert.equal(searched.ok, true);
+    assert.equal(candidateFetched, true);
+    assert.match(searched.textPreview, /Dollar to yen exchange rate quote/);
+    assert.match(searched.evidence.semantic.qualityNotes[0], /low-confidence/i);
+  } finally {
+    global.fetch = previousFetch;
+  }
 }
 
 async function testWebSearchReportsChallengeWithoutFallback() {
@@ -662,13 +825,16 @@ async function main() {
   testFilesTool();
   await testBrowserMockToolReturnsEvidence();
   await testWebToolReturnsEvidenceAndBlocksPrivateTargets();
-  await testWebToolDefaultsToFetchTransportWhenAvailable();
-  await testWebToolUsesCurlTransportAfterFetchNetworkFailure();
+  await testWebToolDefaultsToSingleCurlTransport();
+  await testWebToolSurfacesFetchNetworkFailureWithoutTransportFallback();
   await testWebSearchFetchesResultPagesForEvidence();
   await testWebSearchParsesResultsBeyondInitialSearchPageChunk();
   await testWebSearchReadsRelevantLowerRankedResult();
   await testWebSearchFailsWhenOnlyUnreadableResultPagesExist();
   testWebSearchParsesBingRedirectResultLinks();
+  await testWebSearchSkipsDictionaryResultsForNonDictionaryQueries();
+  await testWebSearchRejectsSingleTokenCountryMatchesForSpecificQueries();
+  await testWebSearchReturnsLowConfidenceParsedResultsForVerifier();
   await testWebSearchReportsChallengeWithoutFallback();
   await testWebSearchUsesTavilyProviderEvidence();
   await testWebSearchTavilyFailureDoesNotFallbackToBing();
