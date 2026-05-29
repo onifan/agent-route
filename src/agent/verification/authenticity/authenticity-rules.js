@@ -45,7 +45,7 @@ function outputLooksLikeList(task = {}, output = "") {
 function evaluateListAuthenticity(state, task = {}, workerResult = {}) {
   const output = workerText(workerResult);
   if (
-    /\b(browser|browser_read|web_read|web_search|web_fetch|api_read|http_fetch|page_read|navigate|网页|浏览器)\b/i.test(
+    /\b(browser|browser_read|web_read|web_search|web_fetch|api_read|http_fetch|local_read|file_read|filesystem_read|page_read|navigate|网页|浏览器)\b/i.test(
       String(task.type || "")
     )
   )

@@ -73,7 +73,7 @@ function registerFixture(goalId) {
 }
 
 function completeCollect(goalId) {
-  taskRuntime.startTask(goalId, "collect", { source: "test", model: "openrouter/test-free:free" });
+  taskRuntime.startTask(goalId, "collect", { source: "test", model: "qwen/test-free:free" });
   const completed = taskRuntime.applyWorkerResult(
     goalId,
     "collect",
@@ -84,14 +84,14 @@ function completeCollect(goalId) {
       artifacts: [{ id: "input_pack", name: "input_pack" }],
       evidence: semanticEvidence("Collected inputs with concrete evidence.")
     },
-    { source: "test", model: "openrouter/test-free:free", elapsedMs: 80 }
+    { source: "test", model: "qwen/test-free:free", elapsedMs: 80 }
   );
   assert.equal(completed.status, TASK_STATUS.COMPLETED);
   return completed;
 }
 
 function failDraftVerification(goalId) {
-  taskRuntime.startTask(goalId, "draft", { source: "test", model: "openrouter/anthropic/claude-sonnet-4.5" });
+  taskRuntime.startTask(goalId, "draft", { source: "test", model: "claude/claude-sonnet-4-5" });
   return taskRuntime.applyWorkerResult(
     goalId,
     "draft",
@@ -110,7 +110,7 @@ function failDraftVerification(goalId) {
         }
       }
     },
-    { source: "test", model: "openrouter/anthropic/claude-sonnet-4.5", elapsedMs: 140 }
+    { source: "test", model: "claude/claude-sonnet-4-5", elapsedMs: 140 }
   );
 }
 
@@ -180,7 +180,7 @@ function testBudgetVerificationRiskAndDiagnostics() {
   assert.ok(snapshot.budgetMonitor.usage.tokenUsage.total >= 0);
   assert.ok(snapshot.verificationMonitor.failures >= 1);
   assert.ok(Number(snapshot.verificationMonitor.averageAuthenticityScore || 0) >= 0);
-  assert.ok(snapshot.diagnostics[0].rootCauses.some((reason) => reason.code === "verification_failed"));
+  assert.ok(snapshot.diagnostics[0].rootCauses.some((reason) => reason.code === "needs_evidence"));
   assert.ok(snapshot.riskMonitor.highRiskTasks.some((task) => task.id === "submit"));
 }
 
@@ -191,7 +191,7 @@ function testWorkerHealthAndMetrics() {
   observability.recordEvent("worker_start", {
     goal_id: goalId,
     task: { id: "draft", title: "Draft output", modelPool: "strong" },
-    model: "openrouter/test-strong"
+    model: "qwen/test-strong"
   });
   observability.recordEvent("worker_done", {
     goal_id: goalId,
@@ -202,13 +202,13 @@ function testWorkerHealthAndMetrics() {
       verificationStatus: "unverified",
       detectedIssues: [{ issue: "hallucinated success", severity: "high" }]
     },
-    model: "openrouter/test-strong",
+    model: "qwen/test-strong",
     ok: false,
     elapsedMs: 220,
     error: "verification failed"
   });
   const health = observability.workerHealth(goalId);
-  assert.equal(health[0].model, "openrouter/test-strong");
+  assert.equal(health[0].model, "qwen/test-strong");
   assert.equal(health[0].failed, 1);
   assert.equal(health[0].hallucinationSignals, 1);
   const metrics = observability.metrics(goalId);

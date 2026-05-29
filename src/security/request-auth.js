@@ -3,14 +3,13 @@
 // Incoming request authentication for the always-on HTTP surface.
 //
 // Threat model: /api/agent-route/run can drive tool execution and internal
-// model calls can use configured provider API keys / OAuth tokens. The hard boundary is the
+// model calls can use configured model API keys. The hard boundary is the
 // default loopback binding (see scripts/start-production.js); this guard adds a
 // second layer so that, once a local API key exists, cross-origin / non-UI
 // callers must present it.
 //
 // Design (matches the chosen policy: loopback bind + key check, local UI exempt):
 //   - If local auth is explicitly disabled -> allow.
-//   - If upstream auth forwarding is enabled -> allow (auth delegated upstream).
 //   - If no active local API key is configured -> allow (rely on loopback bind;
 //     never lock the user out of a fresh install).
 //   - Otherwise allow only same-origin requests (the local web console) or a
@@ -28,10 +27,6 @@ function dataDbPath() {
 
 function localAuthDisabled() {
   return String(process.env.AGENT_ROUTE_DISABLE_LOCAL_AUTH || "").trim() === "1";
-}
-
-function upstreamForwardAuth() {
-  return String(process.env.AGENT_ROUTE_UPSTREAM_FORWARD_AUTH || "").trim() === "true";
 }
 
 function activeApiKeys() {
@@ -118,7 +113,6 @@ function unauthorizedResponse(req) {
 // Returns null when the request is authorized, otherwise a 401 Response.
 function checkRequestAuth(req) {
   if (localAuthDisabled()) return null;
-  if (upstreamForwardAuth()) return null;
   const keys = activeApiKeys();
   if (!keys || keys.size === 0) return null;
   if (isSameOriginRequest(req)) return null;

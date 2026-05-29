@@ -123,6 +123,8 @@ function makeVerifierMessages(originalMessages, task, workerRuntimeResult, ruleV
         "规则验证器已经先检查了技术证据。不要覆盖缺失的 file、shell、browser、API、risk 或 approval 证据。",
         "你的职责只是在证据存在的前提下判断语义质量：输出是否满足任务、是否非空、是否非重复、是否没有明显幻觉。",
         strategy ? "同时应用当前 strategy 的质量标准和停止条件。违反 strategy 的结果不算语义完成。" : "",
+        "证据不足、来源不相关、搜索命中百科/导航页、缺少日期/摘录，或普通 strategy 质量不达标，属于可恢复取证缺口：使用 unverified + needs_evidence/retrying，不要使用 blocked。",
+        "blocked 只用于安全风险、人工确认、预算/权限硬阻断、危险副作用、验证码/登录门槛或明确不可恢复的外部阻断。",
         protocol.baseContract(protocol.KIND.VERIFICATION_RESULT),
         "安全和真实性优先于目标完成。如果证据不足，必须判定为 unverified。"
       ]

@@ -11,6 +11,7 @@ const AGENT_EVENT_BY_PART = {
   "data-agent-run": "start",
   "data-agent-plan": "plan",
   "data-agent-graph": "graph",
+  "data-agent-checkpoint": "checkpoint",
   "data-agent-strategy": "strategy",
   "data-agent-budget": "budget",
   "data-agent-risk": "risk",
@@ -420,16 +421,6 @@ function groupedSteps(events = []) {
   return Array.from(groups.values());
 }
 
-function roundStatusFromEvent(type = "", payload = {}, currentStatus = "running") {
-  const raw = String(type || "").toLowerCase();
-  const status = String(payload.status || payload.finalStatus || payload.final_status || "").toLowerCase();
-  if (raw === "error") return "failed";
-  if (raw === "pause") return status || "blocked";
-  if (raw === "final") return status || "completed";
-  if (raw === "done" && status) return status;
-  return currentStatus;
-}
-
 function isRoundAwaitingProcess(round = {}) {
   if (String(round.answer || "").trim()) return false;
   return ["queued", "pending", "running", "waiting"].includes(String(round.status || "").toLowerCase());
@@ -616,16 +607,23 @@ export default function AgentRouteChatPanel({
   promptSettings = null,
   budgetSettings = null,
   historyGoals = [],
+  focusRequest = 0,
+  resetSignal = 0,
+  onResetAll = null,
   onRoundStart = null,
   onRoundStop = null,
   onAgentEvent = null
 }) {
   const [input, setInput] = useState("");
   const [rounds, setRounds] = useState([]);
+  const [composerPulse, setComposerPulse] = useState(false);
+  const [newTaskMode, setNewTaskMode] = useState(false);
   const inputRef = useRef(null);
+  const composerRef = useRef(null);
   const currentRoundRef = useRef("");
   const assistantMessageKeysAtSubmitRef = useRef(new Set());
   const streamRef = useRef(null);
+  const lastResetSignalRef = useRef(resetSignal);
   const transport = useMemo(
     () =>
       new DefaultChatTransport({
@@ -660,7 +658,7 @@ export default function AgentRouteChatPanel({
       const next = {
         ...round,
         references,
-        status: roundStatusFromEvent(type, payload, round.status),
+        status: round.status,
         updatedAt: event.at,
         events:
           existingEventIndex >= 0
@@ -688,6 +686,27 @@ export default function AgentRouteChatPanel({
     });
   }, []);
 
+  const updateRoundFromCheckpoint = useCallback((roundId, payload = {}) => {
+    const goal = payload.goal && typeof payload.goal === "object" ? payload.goal : {};
+    const text = goal.output || payload.output || "";
+    const status = String(goal.status || payload.status || "").trim();
+    const updatedAt = goal.updatedAt || goal.updated_at || payload.at || new Date().toISOString();
+    if (!roundId) return;
+    setRounds((current) => {
+      const index = current.findIndex((round) => round.id === roundId);
+      const fallbackRound = createRound({ id: roundId, text: goal.goal || goal.title || "AgentRoute 运行" });
+      const round = index >= 0 ? current[index] : fallbackRound;
+      const next = {
+        ...round,
+        answer: String(text || round.answer || ""),
+        status: status || round.status,
+        updatedAt
+      };
+      if (index < 0) return [...current, next];
+      return current.map((item, itemIndex) => (itemIndex === index ? next : item));
+    });
+  }, []);
+
   const chat = useChat({
     id: "agent-route-ai-sdk-chat",
     transport,
@@ -697,6 +716,11 @@ export default function AgentRouteChatPanel({
       if (!event) return;
       const roundId = event.payload.goal_id || event.payload.goalId || currentRoundRef.current;
       if (!roundId) return;
+      if (String(event.type || "").toLowerCase() === "checkpoint") {
+        updateRoundFromCheckpoint(roundId, event.payload);
+        if (typeof onAgentEvent === "function") onAgentEvent(roundId, event.type, event.payload);
+        return;
+      }
       updateRoundFromEvent(roundId, event.type, event.payload, event.partId);
       if (typeof onAgentEvent === "function") onAgentEvent(roundId, event.type, event.payload);
     },
@@ -716,7 +740,10 @@ export default function AgentRouteChatPanel({
 
   useEffect(() => {
     const restored = array(historyGoals).slice().reverse().map(storedRound);
-    if (!restored.length) return;
+    if (!restored.length) {
+      if (!busy) setRounds((current) => (current.length ? [] : current));
+      return;
+    }
     setRounds((current) => {
       const existingById = new Map(current.map((round) => [round.id, round]));
       let changed = restored.length !== current.length;
@@ -747,6 +774,19 @@ export default function AgentRouteChatPanel({
   }, [historyGoals, busy]);
 
   useEffect(() => {
+    if (resetSignal === lastResetSignalRef.current) return;
+    lastResetSignalRef.current = resetSignal;
+    if (busy) chat.stop();
+    currentRoundRef.current = "";
+    assistantMessageKeysAtSubmitRef.current = new Set();
+    setInput("");
+    setNewTaskMode(false);
+    setComposerPulse(false);
+    setRounds([]);
+    chat.setMessages([]);
+  }, [resetSignal, busy, chat]);
+
+  useEffect(() => {
     const node = streamRef.current;
     if (!node) return;
     node.scrollTo({ top: node.scrollHeight, behavior: "smooth" });
@@ -757,6 +797,22 @@ export default function AgentRouteChatPanel({
     if (!key || assistantMessageKeysAtSubmitRef.current.has(key)) return;
     updateRoundAnswer(currentRoundRef.current, latestAnswer);
   }, [latestAnswer, latestAssistant, updateRoundAnswer]);
+
+  useEffect(() => {
+    if (!focusRequest) return;
+    setInput("");
+    setNewTaskMode(true);
+    setComposerPulse(true);
+    const focusTimer = setTimeout(() => {
+      composerRef.current?.scrollIntoView?.({ block: "end", behavior: "smooth" });
+      inputRef.current?.focus();
+    }, 80);
+    const timer = setTimeout(() => setComposerPulse(false), 1200);
+    return () => {
+      clearTimeout(focusTimer);
+      clearTimeout(timer);
+    };
+  }, [focusRequest]);
 
   async function submit(event) {
     event.preventDefault();
@@ -771,6 +827,7 @@ export default function AgentRouteChatPanel({
     setRounds((current) => [...current, createRound({ id: roundId, text })]);
     if (typeof onRoundStart === "function") onRoundStart({ id: roundId, text, commanderModel });
     setInput("");
+    setNewTaskMode(false);
     try {
       await chat.sendMessage(
         { text },
@@ -792,8 +849,14 @@ export default function AgentRouteChatPanel({
   }
 
   function clearChat() {
+    if (typeof onResetAll === "function") {
+      onResetAll();
+      return;
+    }
     if (busy) chat.stop();
     currentRoundRef.current = "";
+    assistantMessageKeysAtSubmitRef.current = new Set();
+    setNewTaskMode(false);
     setRounds([]);
     chat.setMessages([]);
   }
@@ -830,7 +893,17 @@ export default function AgentRouteChatPanel({
         {chat.error ? <div className="agent-chat-error">{chat.error.message}</div> : null}
       </section>
 
-      <form className="agent-chat-composer" onSubmit={submit}>
+      <form
+        className={`agent-chat-composer ${composerPulse ? "attention" : ""} ${newTaskMode ? "new-task-mode" : ""}`}
+        ref={composerRef}
+        onSubmit={submit}
+      >
+        {newTaskMode ? (
+          <div className="agent-chat-new-task-banner" role="status">
+            <Icon name="add_comment" />
+            <span>新任务已准备好，输入目标后发送</span>
+          </div>
+        ) : null}
         <button className="agent-chat-icon-button" type="button" onClick={clearChat} title="清空对话">
           <Icon name="delete_sweep" />
         </button>
@@ -846,7 +919,7 @@ export default function AgentRouteChatPanel({
               event.currentTarget.form?.requestSubmit();
             }
           }}
-          placeholder="输入一个目标..."
+          placeholder={newTaskMode ? "描述一个新任务..." : "输入一个目标..."}
           rows={1}
         />
         <button className="agent-chat-icon-button" type="button" onClick={stopChat} title="停止生成" disabled={!busy}>

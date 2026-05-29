@@ -23,23 +23,24 @@ AGENT_ROUTE_HOME  →  DATA_DIR  →  ~/.agent-route-studio
 | 产物 / 模型统计        | `<home>/...`                            | `AGENT_ROUTE_ARTIFACTS`、`AGENT_ROUTE_MODEL_STATS`                                           |
 | 决策归因 / 学习        | `<home>/...`                            | `AGENT_ROUTE_DECISION_ATTRIBUTION`、`AGENT_ROUTE_ACTION_LEARNING`                            |
 
-## 内部模型 provider
+## 模型 API 设置
 
-Agent 内部模型服务（`src/core/router`）按以下方式确定上游：
+Agent 内部模型服务（`src/core/router` + `src/core/model-api-settings.js`）只从控制台的 **模型 API** 页面读取上游配置。入口：`/agent-route#model-apis`。
 
-**方式一：环境变量直接配置 upstream。**
+支持的模型 API：
 
-| 变量                                                 | 说明                                                                    |
-| ---------------------------------------------------- | ----------------------------------------------------------------------- |
-| `AGENT_ROUTE_UPSTREAM_CHAT_URL`                      | chat 兼容上游地址（也可用 `AGENT_ROUTE_MODEL_PROXY_URL`）               |
-| `AGENT_ROUTE_UPSTREAM_RESPONSES_URL`                 | responses 兼容上游地址（responses 模式）                                |
-| `AGENT_ROUTE_UPSTREAM_API_KEY`                       | 上游 API key（以 Bearer 注入）                                          |
-| `AGENT_ROUTE_UPSTREAM_FORWARD_AUTH`                  | 设为 `true` 时，转发调用方的 Authorization 头（鉴权委托给上游）         |
-| `AGENT_ROUTE_OC_CHAT_URL` / `AGENT_ROUTE_OC_API_KEY` | 备用 OpenAI 兼容上游（也支持 `OC_CHAT_COMPLETIONS_URL` / `OC_API_KEY`） |
+| Provider | 协议                        | 默认 Base URL                                             | 模型前缀                      |
+| -------- | --------------------------- | --------------------------------------------------------- | ----------------------------- |
+| OpenAI   | OpenAI Chat Completions     | `https://api.openai.com/v1`                               | `openai/`                     |
+| Claude   | Anthropic Messages          | `https://api.anthropic.com/v1`                            | `claude/`、`anthropic/`       |
+| Gemini   | OpenAI-compatible           | `https://generativelanguage.googleapis.com/v1beta/openai` | `gemini/`、`gc/`              |
+| Grok     | OpenAI-compatible           | `https://api.x.ai/v1`                                     | `grok/`、`xai/`               |
+| DeepSeek | OpenAI-compatible           | `https://api.deepseek.com`                                | `deepseek/`                   |
+| Qwen     | OpenAI-compatible DashScope | `https://dashscope.aliyuncs.com/compatible-mode/v1`       | `qwen/`、`qw/`                |
+| GLM      | OpenAI-compatible Z.ai/智谱 | `https://open.bigmodel.cn/api/paas/v4`                    | `glm/`、`zhipu/`、`bigmodel/` |
+| Kimi     | OpenAI-compatible Moonshot  | `https://api.moonshot.cn/v1`                              | `kimi/`、`moonshot/`          |
 
-**方式二：在控制台 / provider 管理页添加启用状态的 provider 连接。** 这些连接持久化到本地数据库，由 router 在运行时读取并参与轮询和 failover。`src/core/router/runtime.js` 内置对 OpenRouter、OpenAI、Gemini、DeepSeek、Kimi/Moonshot、GLM/智谱等的路由，按模型前缀（`openrouter/`、`gemini/`、`gc/`、`deepseek/`、`kimi/`、`glm/` 等）匹配。
-
-未配置任何上游时，内部模型调用会返回一条明确的错误，提示配置 `AGENT_ROUTE_UPSTREAM_CHAT_URL` 或添加 provider 连接。
+每个 provider 可设置：启用状态、API Key、第三方 Base URL、默认模型、模型列表；Claude 额外保存 `anthropic-version`。配置持久化在 SQLite 的 `modelApiSettings` 表。未配置匹配模型时，内部模型调用直接返回明确错误；系统不再读取 OpenRouter、OAuth provider、自定义 provider node、`AGENT_ROUTE_UPSTREAM_*` 或旧 SSE 回退配置。
 
 ## Commander 模型
 
@@ -57,7 +58,7 @@ Agent 内部模型服务（`src/core/router`）按以下方式确定上游：
 | 端口                                  | `20128`                  | 由 `npm run dev` / `dev:lan` 脚本指定                                           |
 | `AGENT_ROUTE_ALLOWED_ORIGINS`         | 空                       | 逗号分隔的允许 origin 白名单（用于 CORS）                                       |
 | `AGENT_ROUTE_ALLOW_LAN_DEV`           | 关                       | 设为 `1` 时，开发环境允许局域网（192.168 / 10 / 172.16-31）origin；生产环境无效 |
-| `AGENT_ROUTE_PUBLIC_URL`              | `http://localhost:20128` | OpenRouter `HTTP-Referer` 等外部标识                                            |
+| `AGENT_ROUTE_PUBLIC_URL`              | `http://localhost:20128` | 本地控制台公开 URL                                                              |
 | `AGENT_ROUTE_SHOW_NEXT_DEV_INDICATOR` | 关                       | 设为 `1` 显示 Next.js 开发指示器                                                |
 | `NODE_ENV`                            | ——                       | `production` 时关闭本地 dev origin 放行                                         |
 
@@ -76,17 +77,16 @@ Agent 内部模型服务（`src/core/router`）按以下方式确定上游：
 
 ## 工具相关
 
-| 变量                                                                | 默认            | 说明                                               |
-| ------------------------------------------------------------------- | --------------- | -------------------------------------------------- |
-| `AGENT_ROUTE_BROWSER_CHANNEL`                                       | `chrome`        | Playwright 浏览器 channel                          |
-| `AGENT_ROUTE_WEB_TRANSPORT`                                         | `curl`          | `fetch` 或 `curl`，选择 web 工具的单一传输方式     |
-| `AGENT_ROUTE_WEB_SEARCH_PROVIDER`                                   | ——              | web 搜索 provider 选择                             |
-| `AGENT_ROUTE_TAVILY_API_KEY` / `TAVILY_API_KEY`                     | ——              | Tavily 搜索 key                                    |
-| `AGENT_ROUTE_CODEX_CWD`                                             | `process.cwd()` | codex-cli 工作目录                                 |
-| `AGENT_ROUTE_CODEX_SANDBOX`                                         | ——              | codex-cli sandbox 模式                             |
-| `AGENT_ROUTE_CODEX_OAUTH_BASE_URL` / `_CHAT_URL` / `_RESPONSES_URL` | ——              | codex OAuth 上游                                   |
-| `AGENT_ROUTE_PDF_TIMEOUT_MS`                                        | ——              | PDF 处理超时                                       |
-| `AGENT_ROUTE_DISABLE_LOCAL_ENV`                                     | 关              | 设为 `1` 时不向 codex-cli 等子进程透传本地环境变量 |
+| 变量                                            | 默认            | 说明                                               |
+| ----------------------------------------------- | --------------- | -------------------------------------------------- |
+| `AGENT_ROUTE_BROWSER_CHANNEL`                   | `chrome`        | Playwright 浏览器 channel                          |
+| `AGENT_ROUTE_WEB_TRANSPORT`                     | `curl`          | `fetch` 或 `curl`，选择 web 工具的单一传输方式     |
+| `AGENT_ROUTE_WEB_SEARCH_PROVIDER`               | ——              | web 搜索 provider 选择                             |
+| `AGENT_ROUTE_TAVILY_API_KEY` / `TAVILY_API_KEY` | ——              | Tavily 搜索 key                                    |
+| `AGENT_ROUTE_CODEX_CWD`                         | `process.cwd()` | codex-cli 工作目录                                 |
+| `AGENT_ROUTE_CODEX_SANDBOX`                     | ——              | codex-cli sandbox 模式                             |
+| `AGENT_ROUTE_PDF_TIMEOUT_MS`                    | ——              | PDF 处理超时                                       |
+| `AGENT_ROUTE_DISABLE_LOCAL_ENV`                 | 关              | 设为 `1` 时不向 codex-cli 等子进程透传本地环境变量 |
 
 ## 默认运行与预算策略
 
@@ -96,7 +96,7 @@ Agent 内部模型服务（`src/core/router`）按以下方式确定上游：
 maxTasks: 3              maxGoalIterations: 4     callTimeoutMs: 120000
 modelMaxAttempts: 3      toolMaxAttempts: 3       toolRetryDelayMs: 500
 planMaxTokens: 1600      reviewMaxTokens: 2600    codexCliTimeoutMs: 180000
-verifierModelEnabled: true   verifierTimeoutMs: 45000   dynamicFreeModels: true
+verifierModelEnabled: true   verifierTimeoutMs: 45000   dynamicFreeModels: false
 ```
 
 预算策略（`src/config/policies/budget-policy.js`）默认值（`mode: "limited"`）：

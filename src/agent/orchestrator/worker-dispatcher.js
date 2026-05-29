@@ -3,6 +3,7 @@
 const browserWorker = require("./browser-worker");
 const { safeJsonParse } = require("./content-utils");
 const documentWorker = require("./document-worker");
+const localReadWorker = require("./local-read-worker");
 const mcpClient = require("../mcp/client");
 const protocol = require("./protocol");
 const webToolWorker = require("./web-tool-worker");
@@ -155,7 +156,7 @@ async function dispatchWorker({
   persistGoalBudget,
   send,
   taskSummary,
-  callWithFallback,
+  callRoutedModel,
   makeWorkerMessages,
   runCodexCliTask,
   shouldForwardCodexLog
@@ -182,6 +183,28 @@ async function dispatchWorker({
             task: runningTask,
             config,
             previousResults: workerResults
+          },
+          config,
+          runningTask
+        })
+    });
+  }
+
+  if (localReadWorker.shouldUseLocalReadWorker(runningTask)) {
+    return runToolWithRetry({
+      toolName: "files",
+      model: "files-tool",
+      runningTask,
+      config,
+      trace,
+      send,
+      taskSummary,
+      execute: () =>
+        runMcpWorker({
+          toolName: mcpClient.WORKER_MCP_TOOLS.files,
+          args: {
+            task: runningTask,
+            config
           },
           config,
           runningTask
@@ -272,7 +295,7 @@ async function dispatchWorker({
     return result;
   }
 
-  const attempt = await callWithFallback({
+  const attempt = await callRoutedModel({
     req,
     nextHandler,
     baseBody,
@@ -290,7 +313,7 @@ async function dispatchWorker({
         ...data,
         task: taskSummary(runningTask)
       }),
-    responseFormatKind: protocol.KIND.WORKER_RESULT,
+    functionCallKind: protocol.KIND.WORKER_RESULT,
     validateContent: (content) =>
       protocol.validationForCall(content, protocol.KIND.WORKER_RESULT, (value) =>
         value.status ? { ok: true } : { ok: false, error: "Worker result must include status." }

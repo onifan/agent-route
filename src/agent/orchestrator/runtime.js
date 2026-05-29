@@ -20,11 +20,7 @@ const modelRoutingService = require("./model-routing-service");
 const planner = require("./planner");
 const promptService = require("./prompt-service");
 const protocol = require("./protocol");
-const resultNormalizer = require("./result-normalizer");
 const reviewRunner = require("./review-runner");
-const tokenBudget = require("./token-budget");
-const budgetService = require("./budget-service");
-const riskGateService = require("./risk-gate-service");
 const taskAppender = require("./task-appender");
 const taskContext = require("./task-context");
 const taskExecutor = require("./task-executor");
@@ -40,7 +36,6 @@ const { checkRequestAuth } = require("../../security/request-auth");
 
 const { TASK_STATUS } = taskRuntime;
 const { handleAgentRouteAction, normalizeAgentRouteAction } = actionApi;
-const { applyVerificationToTaskSummary, makeWorkerRuntimeResult, verificationGateWorkerResult } = resultNormalizer;
 
 const AGENT_MODEL_IDS = new Set(["agent-auto", "agent-router", "auto-agent", "goal-agent"]);
 
@@ -60,10 +55,6 @@ function loadConfig() {
 
 function freeModelScore(model) {
   return modelRoutingService.freeModelScore(model);
-}
-
-async function fetchDynamicFreeModels(config) {
-  return modelRoutingService.fetchDynamicFreeModels(config);
 }
 
 async function resolveConfig() {
@@ -141,6 +132,13 @@ function requestWithBody(req, body, timeoutMs) {
   };
 }
 
+function detachedRequestFromClientAbort(req) {
+  return new Request(req.url, {
+    method: req.method || "POST",
+    headers: new Headers(req.headers || {})
+  });
+}
+
 function messagesToText(messages) {
   return contentUtils.messagesToText(messages);
 }
@@ -181,12 +179,12 @@ async function parseModelResponse(response) {
   return contentUtils.parseModelResponse(response);
 }
 
-function normalizeComplexity(value, fallback = "medium") {
-  return planner.normalizeComplexity(value, fallback);
+function normalizeComplexity(value, defaultValue = "medium") {
+  return planner.normalizeComplexity(value, defaultValue);
 }
 
-function normalizeRiskLevel(value, fallback = "low") {
-  return planner.normalizeRiskLevel(value, fallback);
+function normalizeRiskLevel(value, defaultValue = "low") {
+  return planner.normalizeRiskLevel(value, defaultValue);
 }
 
 function normalizeStringList(value) {
@@ -218,33 +216,11 @@ function estimateGoalComplexity(messages = []) {
   return "low";
 }
 
-function recoverPlannerAttempt(attempt, messages, config, trace, reason = "") {
-  return planner.recoverPlannerAttempt(attempt, messages, config || DEFAULT_CONFIG, trace, reason);
-}
-
-function parsePlannerContent(content) {
-  return planner.parsePlannerContent(content);
-}
-
-function normalizePlan(plan, config, messages = [], strategy = null) {
-  return planner.normalizePlan(plan, config, messages, strategy);
-}
-
-function makePlanPrompt(messages, config, memoryText = "", strategy = null) {
-  return planner.makePlanPrompt(messages, config, memoryText, strategy, { normalizePromptSettings });
-}
-
 function makeWorkerMessages(originalMessages, task, config, memoryText = "", previousResults = []) {
   return workerRunner.makeWorkerMessages(originalMessages, task, config, memoryText, {
     normalizePromptSettings,
     tierPromptForTask,
     previousResults
-  });
-}
-
-function makeFinalMessages(originalMessages, plan, results, config, memoryText = "", strategy = null) {
-  return finalizer.makeFinalMessages(originalMessages, plan, results, config, memoryText, strategy, {
-    normalizePromptSettings
   });
 }
 
@@ -270,7 +246,8 @@ async function verifyTaskResultWithOptionalModel({
 }) {
   const ruleVerification = verificationEngine.verifyTaskResult(task, workerRuntimeResult, {
     phase: "after_worker",
-    strategy
+    strategy,
+    verificationPolicy: config.verificationPolicy
   });
   let verification = verificationEngine.compactVerification(ruleVerification);
   const verifierEnabled = config.verifierModelEnabled !== false;
@@ -289,7 +266,7 @@ async function verifyTaskResultWithOptionalModel({
   ];
   if (!verifierModels.length) return verification;
 
-  const attempt = await callWithFallback({
+  const attempt = await callRoutedModel({
     req,
     nextHandler,
     baseBody,
@@ -303,7 +280,7 @@ async function verifyTaskResultWithOptionalModel({
     budgetState,
     task,
     onBudgetUpdate,
-    responseFormatKind: protocol.KIND.VERIFICATION_RESULT,
+    functionCallKind: protocol.KIND.VERIFICATION_RESULT,
     validateContent: (content) =>
       protocol.validationForCall(content, protocol.KIND.VERIFICATION_RESULT, (value) =>
         value.verificationStatus || typeof value.verified === "boolean"
@@ -339,7 +316,7 @@ async function verifyTaskResultWithOptionalModel({
     }
     return verification;
   }
-  verification = verificationEngine.mergeModelVerification(verification, parsed.value);
+  verification = verificationEngine.mergeModelVerification(verification, parsed.value, config.verificationPolicy);
   return verificationEngine.compactVerification(verification);
 }
 
@@ -368,7 +345,7 @@ function nonInternalPlannedTasks(tasks = []) {
 }
 
 function unresolvedPlannedTasks(tasks = []) {
-  return nonInternalPlannedTasks(tasks).filter((task) => isActionableUnresolvedTask(task));
+  return nonInternalPlannedTasks(tasks).filter((task) => isActionableUnresolvedTask(task, tasks));
 }
 
 function taskAttemptsExhausted(task = {}) {
@@ -396,9 +373,26 @@ function isExhaustedEvidenceGapTask(task = {}) {
   return taskAttemptsExhausted(task) && taskHasWorkerObservation(task);
 }
 
-function isActionableUnresolvedTask(task = {}) {
+function isEvidenceGapCoveredByAlternativeVerifiedArtifact(task = {}, tasks = []) {
+  const status = String(task.status || TASK_STATUS.WAITING).toLowerCase();
+  if (![TASK_STATUS.NEEDS_EVIDENCE, TASK_STATUS.RETRY_READY].includes(status)) return false;
+  if (!taskHasWorkerObservation(task)) return false;
+  const produced = dependencyEngine.normalizeArtifacts(
+    task.produces || task.producedArtifacts || task.produced_artifacts || task.artifacts,
+    task.id || ""
+  );
+  if (!produced.length) return false;
+  const artifacts = dependencyEngine.buildArtifactRegistry(tasks);
+  return produced.some((ref) => {
+    const provider = artifacts.get(ref.id) || (ref.path ? artifacts.get(ref.path) : null);
+    return provider && provider.taskId && provider.taskId !== task.id;
+  });
+}
+
+function isActionableUnresolvedTask(task = {}, tasks = []) {
   const status = String(task.status || TASK_STATUS.WAITING).toLowerCase();
   if (isTerminalTaskStatus(status)) return false;
+  if (isEvidenceGapCoveredByAlternativeVerifiedArtifact(task, tasks)) return false;
   if (isExhaustedEvidenceGapTask({ ...task, status })) return false;
   return true;
 }
@@ -508,8 +502,8 @@ function messagesToResponsesPayload(messages) {
   };
 }
 
-function isFreeFallbackModel(model) {
-  return modelRoutingService.isFreeFallbackModel(model);
+function isLowCostModel(model) {
+  return modelRoutingService.isLowCostModel(model);
 }
 
 function modelRequestBody(baseBody, model, messages, endpointMode) {
@@ -618,9 +612,11 @@ function tokenRetryMessages(messages = [], limit = 0, label = "") {
   const guidance = [
     `Retry constraint: upstream quota only permits about ${limit} output tokens.`,
     "Return the shortest valid answer for this phase. Do not add explanations.",
-    String(label || "").startsWith("plan") ? "For planning, return compact JSON only, with no more than 3 tasks." : "",
+    String(label || "").startsWith("plan")
+      ? "For planning, submit compact function arguments with no more than 3 tasks."
+      : "",
     String(label || "").startsWith("goal-review")
-      ? "For review, return compact JSON only; prefer a finalAnswer when evidence is sufficient."
+      ? "For review, submit compact function arguments; prefer a finalAnswer when evidence is sufficient."
       : ""
   ]
     .filter(Boolean)
@@ -708,17 +704,17 @@ function retryMessagesForModelAttempt(messages, error, attemptNumber, maxAttempt
         "Use the original task and constraints.",
         "[约束]",
         "Do not invent missing evidence or claim completion without support.",
-        "If the previous error mentions multiple JSON documents, return one single top-level JSON object and put multiple items inside that object's array fields.",
+        "If the previous error mentions function arguments, call only the required function and put multiple items inside one arguments object's array fields.",
         "[内部逐步推理]",
         "Reason step by step internally about the previous format error and the original task, but do not output chain-of-thought.",
         "[结构化输出]",
-        "Return exactly the required JSON schema or format for this phase."
+        "Call exactly the required function with arguments matching the schema for this phase."
       ].join("\n")
     }
   ];
 }
 
-async function callWithFallback({
+async function callRoutedModel({
   req,
   nextHandler,
   baseBody,
@@ -734,7 +730,7 @@ async function callWithFallback({
   onBudgetUpdate = null,
   onModelEvent = null,
   validateContent = null,
-  responseFormatKind = ""
+  functionCallKind = ""
 }) {
   const routedModels = budgetGovernor.routeModels([...new Set((models || []).filter(Boolean))], { budgetState, task });
   const maxPromptTokens = budgetGovernor.maxPromptTokensForState(config && config.budget, budgetState);
@@ -774,7 +770,7 @@ async function callWithFallback({
     lastModel = model;
     const timeoutMs = timeoutMsOverride
       ? Number(timeoutMsOverride)
-      : isFreeFallbackModel(model)
+      : isLowCostModel(model)
         ? Number(config.freeCallTimeoutMs || config.callTimeoutMs || DEFAULT_CONFIG.freeCallTimeoutMs)
         : Number(config.callTimeoutMs || DEFAULT_CONFIG.callTimeoutMs);
 
@@ -806,10 +802,14 @@ async function callWithFallback({
         ]);
         const parsed = await parseModelResponse(response.clone ? response.clone() : response);
         const elapsedMs = Date.now() - started;
+        const functionCallResult = functionCallKind
+          ? protocol.functionArgumentsFromResponse(parsed.data, functionCallKind)
+          : { ok: true, content: parsed.content || "", error: "" };
+        const modelContent = functionCallResult.content || "";
         const modelUsage = budgetGovernor.estimateModelCallUsage({
           model,
           messages: messagesForUsage,
-          content: parsed.content || parsed.text || "",
+          content: modelContent || parsed.text || "",
           elapsedMs,
           label: traceOptions.label || label
         });
@@ -821,9 +821,39 @@ async function callWithFallback({
             })
           : null;
         if (budgetEvaluation && typeof onBudgetUpdate === "function") onBudgetUpdate(budgetEvaluation);
-        if (response.ok && parsed.content) {
+        if (response.ok && !functionCallResult.ok) {
+          const validationError = functionCallResult.error;
+          trace.push({
+            label: traceOptions.label || label,
+            model,
+            ok: false,
+            status: response.status,
+            error: String(validationError).slice(0, 240),
+            elapsedMs,
+            retry: traceOptions.retry,
+            maxTokens,
+            budget: budgetEvaluation ? budgetGovernor.compactEvaluation(budgetEvaluation) : undefined
+          });
+          emitModelEvent("model_failure", {
+            model,
+            status: response.status,
+            error: safeModelError(validationError),
+            elapsedMs,
+            retry: traceOptions.retry,
+            maxTokens,
+            label: eventLabel
+          });
+          return {
+            ok: false,
+            error: validationError,
+            status: response.status,
+            elapsedMs,
+            budgetEvaluation
+          };
+        }
+        if (response.ok && modelContent) {
           const validation =
-            typeof validateContent === "function" ? validateContent(parsed.content, { model, label }) : null;
+            typeof validateContent === "function" ? validateContent(modelContent, { model, label }) : null;
           if (validation && validation.ok === false) {
             const validationDiagnostics =
               validation.diagnostics && typeof validation.diagnostics === "object" ? validation.diagnostics : null;
@@ -879,7 +909,7 @@ async function callWithFallback({
             maxTokens,
             label: eventLabel
           });
-          return { ok: true, model, content: parsed.content, data: parsed.data, elapsedMs, budgetEvaluation };
+          return { ok: true, model, content: modelContent, data: parsed.data, elapsedMs, budgetEvaluation };
         }
         const error =
           parsed.data && parsed.data.error
@@ -961,8 +991,8 @@ async function callWithFallback({
     while (callsUsed < maxModelAttempts) {
       callsUsed += 1;
       const modelAttempt = callsUsed;
-      const requestBaseBody = responseFormatKind
-        ? protocol.jsonModeRequestBody(baseBody, endpointMode, responseFormatKind)
+      const requestBaseBody = functionCallKind
+        ? protocol.functionCallingRequestBody(baseBody, endpointMode, functionCallKind)
         : baseBody;
       const body = modelRequestBody(requestBaseBody, model, currentMessages, endpointMode);
       const attempt = await executeRequest(body, currentMessages, {
@@ -988,8 +1018,8 @@ async function callWithFallback({
         const retryMessages = tokenRetryMessages(scopedMessages, retryLimit, label);
         const retryBaseBody = withResponseMaxTokenLimit(baseBody, endpointMode, retryLimit);
         const retryBody = modelRequestBody(
-          responseFormatKind
-            ? protocol.jsonModeRequestBody(retryBaseBody, endpointMode, responseFormatKind)
+          functionCallKind
+            ? protocol.functionCallingRequestBody(retryBaseBody, endpointMode, functionCallKind)
             : retryBaseBody,
           model,
           retryMessages,
@@ -1147,422 +1177,6 @@ function shouldForwardCodexLog(log) {
   return codexCliRunner.shouldForwardCodexLog(log);
 }
 
-async function runAgentChat(req, body, nextHandler, endpointMode = "chat") {
-  const config = modelRoutingService.applyActiveProviderModels(applyRequestConfig(await resolveConfig(), body));
-  const trace = [];
-  const baseBody = makeBaseBody(body, endpointMode);
-  const commanderRoute = resolveCommanderRoute(body, config);
-  const startedAt = Date.now();
-  const goalId = String(
-    body.goal_id ||
-      body.goalId ||
-      (body.agent_route && (body.agent_route.goal_id || body.agent_route.goalId)) ||
-      `chat-${startedAt}`
-  );
-  const goalBudget = budgetGovernor.createGoalBudgetState({ goalId, policy: config.budget, startedAt });
-  const messages = body.messages || [];
-  const goalQuery = messagesToText(messages);
-  memoryRuntime.captureExplicitUserMemories(messages, { source: "user" });
-  const plannerMemory = memoryRuntime.relevantMemoriesForPrompt({
-    query: goalQuery,
-    types: ["knowledge", "procedure", "episodic"],
-    limit: 6
-  }).text;
-  const strategy = strategyEngine.generateStrategy({
-    goalId,
-    goalText: goalQuery,
-    memoryText: plannerMemory,
-    budgetPolicy: config.budget,
-    revisionReason: "initial chat strategy"
-  });
-  memoryRuntime.createMemoriesFromCandidates([strategyEngine.memoryCandidateForStrategy(strategy)], {
-    goalId,
-    source: "strategic-layer",
-    sourceSummary: "Initial strategy"
-  });
-
-  const planAttempt = await callWithFallback({
-    req,
-    nextHandler,
-    baseBody: {
-      ...baseBody,
-      max_tokens: tokenBudget.planMaxTokens(config, DEFAULT_CONFIG)
-    },
-    models: shouldUseCodexCliWorker(messages) ? commanderRoute.models.slice(0, 1) : commanderRoute.models,
-    messages: makePlanPrompt(messages, config, plannerMemory, strategy),
-    config,
-    label: "plan",
-    trace,
-    endpointMode,
-    timeoutMsOverride: Number(config.commanderTimeoutMs || DEFAULT_CONFIG.commanderTimeoutMs),
-    budgetState: goalBudget,
-    task: { id: "plan", type: "planning", modelPool: "commander", riskLevel: "medium" },
-    responseFormatKind: protocol.KIND.PLAN,
-    validateContent: (content) => {
-      const parsed = planner.parsePlannerContent(content);
-      return parsed
-        ? { ok: true }
-        : {
-            ok: false,
-            error: "Planner response did not contain a valid structured plan object.",
-            diagnostics: planner.plannerContentDiagnostics(content)
-          };
-    }
-  });
-
-  const parsedPlan = planAttempt.ok ? parsePlannerContent(planAttempt.content) : null;
-  if (!planAttempt.ok || !parsedPlan) {
-    recoverPlannerAttempt(
-      planAttempt,
-      messages,
-      config,
-      trace,
-      planAttempt.error || planAttempt.content || "planner returned no structured tasks"
-    );
-  }
-  if (!planAttempt.ok) {
-    return {
-      content: `Commander could not create a plan: ${planAttempt.error || "unknown error"}`,
-      model: planAttempt.model || commanderRoute.selected,
-      commanderModel: commanderRoute.selected,
-      trace
-    };
-  }
-  if (!parsedPlan) {
-    return {
-      content: "Commander returned an invalid or empty plan.",
-      model: planAttempt.model || commanderRoute.selected,
-      commanderModel: commanderRoute.selected,
-      trace
-    };
-  }
-  const normalizedPlan = normalizePlan(parsedPlan, config, messages, strategy);
-  const constrainedPlan = strategyEngine.constrainPlan(normalizedPlan, strategy);
-  if (constrainedPlan.changed) {
-    trace.push({
-      label: "strategy:plan",
-      model: "strategy-engine",
-      ok: constrainedPlan.tasks.length > 0,
-      violations: constrainedPlan.violations.slice(0, 8)
-    });
-  }
-  const plan = { tasks: constrainedPlan.tasks };
-  if (!plan.tasks.length) {
-    return {
-      content: `Strategic layer blocked the planner output because no strategy-compliant task remained. ${constrainedPlan.violations.map((item) => item.message).join(" ") || "The goal needs a revised strategy or human direction."}`,
-      model: "strategy-engine",
-      commanderModel: commanderRoute.selected,
-      trace
-    };
-  }
-
-  const workerResults = [];
-  for (let task of plan.tasks) {
-    const goalBudgetEval = budgetService.evaluateGoalBudget(goalBudget, { phase: "task_loop" });
-    if (budgetService.shouldBlockForBudget(goalBudgetEval)) {
-      const budgetTask = budgetService.applyBudgetToTask(task, goalBudgetEval);
-      workerResults.push(budgetService.blockedWorkerResult(budgetTask, goalBudgetEval));
-      break;
-    }
-    const preRisk = riskGateService.evaluateTaskRisk(task, {
-      phase: "before",
-      goal: goalQuery,
-      nextAttempt: 1
-    });
-    task = riskGateService.applyRiskToTask(task, preRisk);
-    if (riskGateService.shouldBlockForRisk(preRisk, task)) {
-      const result = riskGateService.blockedWorkerResult(task, preRisk);
-      trace.push({
-        label: `risk:${task.id}`,
-        model: "risk-engine",
-        ok: false,
-        riskLevel: preRisk.riskLevel,
-        reason: preRisk.blockedReason || preRisk.approvalReason
-      });
-      workerResults.push(result);
-      memoryRuntime.captureTaskMemory({
-        task: result.task,
-        workerResult: makeWorkerRuntimeResult(result, result.task),
-        source: "risk-engine"
-      });
-      continue;
-    }
-    const workerMemory = memoryRuntime.relevantMemoriesForPrompt({
-      task,
-      query: goalQuery,
-      types: ["knowledge", "procedure", "episodic"],
-      limit: 5
-    }).text;
-    if (task.modelPool === "codex-cli") {
-      const result = await runCodexCliTask(messages, task, config, workerResults, undefined, workerMemory);
-      trace.push({
-        label: `worker:${task.id}`,
-        model: "codex-cli",
-        ok: result.ok,
-        elapsedMs: result.elapsedMs,
-        error: result.ok ? undefined : String(result.error || "").slice(0, 240)
-      });
-      const workerRuntimeResult = makeWorkerRuntimeResult(result, task);
-      budgetGovernor.recordGoalUsage(
-        goalBudget,
-        budgetGovernor.usageFromWorkerResult(workerRuntimeResult, {
-          model: result.model || "codex-cli",
-          elapsedMs: result.elapsedMs || 0,
-          taskId: task.id
-        }),
-        { phase: "worker_result", taskId: task.id, model: result.model || "codex-cli" }
-      );
-      const postRisk = riskGateService.evaluateTaskRisk(task, {
-        phase: "after",
-        goal: goalQuery,
-        workerResult: workerRuntimeResult,
-        model: result.model || "codex-cli"
-      });
-      if (riskGateService.shouldBlockForRisk(postRisk, task)) {
-        const gatedTask = riskGateService.applyRiskToTask(task, postRisk);
-        const gatedResult = riskGateService.blockedWorkerResult(gatedTask, postRisk);
-        trace.push({
-          label: `risk:${task.id}:after`,
-          model: "risk-engine",
-          ok: false,
-          riskLevel: postRisk.riskLevel,
-          reason: postRisk.blockedReason || postRisk.approvalReason
-        });
-        workerResults.push(gatedResult);
-        memoryRuntime.captureTaskMemory({
-          task: gatedResult.task,
-          workerResult: makeWorkerRuntimeResult(gatedResult, gatedResult.task),
-          source: "risk-engine"
-        });
-        continue;
-      }
-      if (!result.ok) {
-        workerResults.push(result);
-        memoryRuntime.captureTaskMemory({
-          task: { ...task, status: TASK_STATUS.FAILED, result: result.content, error: result.error },
-          workerResult: workerRuntimeResult,
-          source: result.model || "codex-cli"
-        });
-        continue;
-      }
-      const verification = await verifyTaskResultWithOptionalModel({
-        req,
-        nextHandler,
-        baseBody,
-        config,
-        commanderRoute,
-        messages,
-        task,
-        workerRuntimeResult,
-        trace,
-        endpointMode,
-        modelLabel: "verifier",
-        budgetState: goalBudget,
-        strategy
-      });
-      const verifiedTask = applyVerificationToTaskSummary(task, verification);
-      if (verification.suggestedNextState !== verificationEngine.SUGGESTED_NEXT_STATE.COMPLETED) {
-        const gatedResult = verificationGateWorkerResult(verifiedTask, verification);
-        trace.push({
-          label: `verification:${task.id}`,
-          model: "verification-engine",
-          ok: false,
-          verificationStatus: verification.verificationStatus,
-          confidence: verification.confidence
-        });
-        workerResults.push(gatedResult);
-        memoryRuntime.captureTaskMemory({
-          task: gatedResult.task,
-          workerResult: makeWorkerRuntimeResult(gatedResult, gatedResult.task),
-          source: "verification-engine"
-        });
-        continue;
-      }
-      workerResults.push({ ...result, task: verifiedTask });
-      memoryRuntime.captureTaskMemory({
-        task: {
-          ...verifiedTask,
-          status: result.ok ? TASK_STATUS.COMPLETED : TASK_STATUS.FAILED,
-          result: result.content,
-          error: result.error
-        },
-        workerResult: workerRuntimeResult,
-        source: result.model || "codex-cli"
-      });
-      continue;
-    }
-    const pool = modelsForTask(config, task, commanderRoute, goalBudget);
-    const attempt = await callWithFallback({
-      req,
-      nextHandler,
-      baseBody,
-      models: pool,
-      messages: makeWorkerMessages(messages, task, config, workerMemory),
-      config,
-      label: `worker:${task.id}`,
-      trace,
-      endpointMode,
-      budgetState: goalBudget,
-      task,
-      responseFormatKind: protocol.KIND.WORKER_RESULT,
-      validateContent: (content) =>
-        protocol.validationForCall(content, protocol.KIND.WORKER_RESULT, (value) =>
-          value.status ? { ok: true } : { ok: false, error: "Worker result must include status." }
-        )
-    });
-    const workerResult = {
-      task,
-      ok: attempt.ok,
-      model: attempt.model,
-      content: attempt.content,
-      error: attempt.error
-    };
-    const workerRuntimeResult = makeWorkerRuntimeResult(workerResult, task);
-    budgetGovernor.recordGoalUsage(
-      goalBudget,
-      budgetGovernor.usageFromWorkerResult(workerRuntimeResult, {
-        model: attempt.model || task.modelPool,
-        elapsedMs: attempt.elapsedMs || 0,
-        taskId: task.id
-      }),
-      { phase: "worker_result", taskId: task.id, model: attempt.model || task.modelPool }
-    );
-    const postRisk = riskGateService.evaluateTaskRisk(task, {
-      phase: "after",
-      goal: goalQuery,
-      workerResult: workerRuntimeResult,
-      model: attempt.model || task.modelPool
-    });
-    if (riskGateService.shouldBlockForRisk(postRisk, task)) {
-      const gatedTask = riskGateService.applyRiskToTask(task, postRisk);
-      const gatedResult = riskGateService.blockedWorkerResult(gatedTask, postRisk);
-      trace.push({
-        label: `risk:${task.id}:after`,
-        model: "risk-engine",
-        ok: false,
-        riskLevel: postRisk.riskLevel,
-        reason: postRisk.blockedReason || postRisk.approvalReason
-      });
-      workerResults.push(gatedResult);
-      memoryRuntime.captureTaskMemory({
-        task: gatedResult.task,
-        workerResult: makeWorkerRuntimeResult(gatedResult, gatedResult.task),
-        source: "risk-engine"
-      });
-      continue;
-    }
-    if (!attempt.ok) {
-      workerResults.push(workerResult);
-      memoryRuntime.captureTaskMemory({
-        task: { ...task, status: TASK_STATUS.FAILED, result: attempt.content, error: attempt.error },
-        workerResult: workerRuntimeResult,
-        source: attempt.model || task.modelPool
-      });
-      continue;
-    }
-    const verification = await verifyTaskResultWithOptionalModel({
-      req,
-      nextHandler,
-      baseBody,
-      config,
-      commanderRoute,
-      messages,
-      task,
-      workerRuntimeResult,
-      trace,
-      endpointMode,
-      modelLabel: "verifier",
-      budgetState: goalBudget,
-      strategy
-    });
-    const verifiedTask = applyVerificationToTaskSummary(task, verification);
-    if (verification.suggestedNextState !== verificationEngine.SUGGESTED_NEXT_STATE.COMPLETED) {
-      const gatedResult = verificationGateWorkerResult(verifiedTask, verification);
-      trace.push({
-        label: `verification:${task.id}`,
-        model: "verification-engine",
-        ok: false,
-        verificationStatus: verification.verificationStatus,
-        confidence: verification.confidence
-      });
-      workerResults.push(gatedResult);
-      memoryRuntime.captureTaskMemory({
-        task: gatedResult.task,
-        workerResult: makeWorkerRuntimeResult(gatedResult, gatedResult.task),
-        source: "verification-engine"
-      });
-      continue;
-    }
-    workerResults.push({ ...workerResult, task: verifiedTask });
-    memoryRuntime.captureTaskMemory({
-      task: {
-        ...verifiedTask,
-        status: attempt.ok ? TASK_STATUS.COMPLETED : TASK_STATUS.FAILED,
-        result: attempt.content,
-        error: attempt.error
-      },
-      workerResult: workerRuntimeResult,
-      source: attempt.model || task.modelPool
-    });
-  }
-
-  const successfulWorkers = workerResults.filter((result) => result.ok);
-  if (successfulWorkers.length === 0) {
-    throw new Error("AgentRoute produced no successful worker evidence, so it cannot create a final answer.");
-  }
-
-  const finalAttempt = await callWithFallback({
-    req,
-    nextHandler,
-    baseBody,
-    models: shouldUseCodexCliWorker(messages) ? commanderRoute.models.slice(0, 1) : commanderRoute.models,
-    messages: makeFinalMessages(
-      messages,
-      plan,
-      workerResults,
-      config,
-      memoryRuntime.relevantMemoriesForPrompt({
-        query: goalQuery,
-        types: ["knowledge", "procedure", "episodic"],
-        limit: 6
-      }).text,
-      strategy
-    ),
-    config,
-    label: "final",
-    trace,
-    endpointMode,
-    timeoutMsOverride: shouldUseCodexCliWorker(messages)
-      ? Number(config.commanderTimeoutMs || DEFAULT_CONFIG.commanderTimeoutMs)
-      : undefined,
-    budgetState: goalBudget,
-    task: { id: "final", type: "final", modelPool: "commander", riskLevel: "medium" },
-    responseFormatKind: protocol.KIND.FINAL_ANSWER,
-    validateContent: (content) =>
-      protocol.validationForCall(content, protocol.KIND.FINAL_ANSWER, (value) =>
-        typeof value.answerMarkdown === "string" && value.answerMarkdown.trim()
-          ? { ok: true }
-          : { ok: false, error: "Final answer must include non-empty answerMarkdown." }
-      )
-  });
-
-  if (finalAttempt.ok) {
-    const parsedFinal = protocol.parseProtocolContent(finalAttempt.content, protocol.KIND.FINAL_ANSWER, (value) =>
-      typeof value.answerMarkdown === "string" && value.answerMarkdown.trim()
-        ? { ok: true }
-        : { ok: false, error: "Final answer must include non-empty answerMarkdown." }
-    );
-    return {
-      content: parsedFinal.ok ? parsedFinal.value.answerMarkdown : "",
-      model: finalAttempt.model,
-      commanderModel: commanderRoute.selected,
-      trace
-    };
-  }
-
-  throw new Error(`Final synthesis failed: ${finalAttempt.error || "unknown error"}`);
-}
-
 function streamAgentRouteUiMessages(run, requestOrOrigin = null) {
   return eventStream.streamAgentRouteUiMessages(run, { observabilityRuntime, request: requestOrOrigin });
 }
@@ -1574,30 +1188,17 @@ function finalGoalStatusFromTasks(content = "", tasks = []) {
   if (!text.trim()) {
     return { status: TASK_STATUS.FAILED, blockedReason: "Final synthesis produced no content." };
   }
-  const failedEvidenceTask = (tasks || []).some((task) => {
-    if (!task || task.internal || task.routeInternal) return false;
-    const status = String(task.status || "").toLowerCase();
-    const type = String(task.type || "").toLowerCase();
-    const exhaustedEvidenceGap = isExhaustedEvidenceGapTask(task);
-    return (
-      (["failed", "blocked", "waiting_human", "awaiting_confirmation"].includes(status) || exhaustedEvidenceGap) &&
-      /^(web_search|web_read|web_fetch|api_read|http_fetch|browser|local_execution)$/.test(type)
-    );
-  });
-  const explicitGap =
-    /partial|incomplete|missing|unavailable|unable|could not|failed to|insufficient|unverified|not verified|blocked|部分完成|缺失|未取得|获取失败|无法|不能|证据不足|未验证|阻塞/i.test(
-      text
-    );
-  if (failedEvidenceTask && explicitGap) {
+  const finalBlock = finalBlockedByUnresolvedPlannedTasks(tasks);
+  if (finalBlock.blocked) {
     return {
-      status: TASK_STATUS.BLOCKED,
-      blockedReason: "Final answer reports incomplete required evidence."
+      status: finalBlock.status,
+      blockedReason: finalBlock.message
     };
   }
   return { status: TASK_STATUS.COMPLETED, blockedReason: "" };
 }
 
-async function runAgentRouteEvents(req, body, nextHandler, send) {
+async function createAgentRouteRuntimeSession(req, body, nextHandler, send) {
   const config = modelRoutingService.applyActiveProviderModels(applyRequestConfig(await resolveConfig(), body));
   const trace = [];
   const messages = Array.isArray(body.messages) ? body.messages : [];
@@ -1679,6 +1280,26 @@ async function runAgentRouteEvents(req, body, nextHandler, send) {
     });
   };
 
+  const emitCheckpoint = (phase = "checkpoint", extra = {}) => {
+    const goal = taskRuntime.publicGoal(taskRuntime.getGoal(goalId));
+    if (!goal) return null;
+    const graph = taskRuntime.getExecutionGraph(goalId);
+    const payload = {
+      goal_id: goalId,
+      phase,
+      at: new Date().toISOString(),
+      goal,
+      tasks: goal.tasks || [],
+      graph,
+      ready_tasks: graph.readyTaskIds || [],
+      parallel_groups: graph.parallelGroups || [],
+      blocked_chains: graph.blockedChains || [],
+      ...extra
+    };
+    send("checkpoint", payload);
+    return payload;
+  };
+
   const emitGraph = (event = dependencyEngine.GRAPH_EVENT.UPDATED, extra = {}) => {
     const graph = taskRuntime.getExecutionGraph(goalId);
     send("graph", {
@@ -1690,6 +1311,7 @@ async function runAgentRouteEvents(req, body, nextHandler, send) {
       blocked_chains: graph.blockedChains || [],
       ...extra
     });
+    emitCheckpoint(`graph:${event}`, { graph_event: event });
     return graph;
   };
 
@@ -1750,51 +1372,6 @@ async function runAgentRouteEvents(req, body, nextHandler, send) {
     return latest;
   };
 
-  if (resumeGoal) {
-    const existingTasks = taskRuntime.listTasks(goalId);
-    for (const task of existingTasks) {
-      knownTaskIds.add(task.id);
-      allTasks.push(task);
-      if (isTerminalTaskStatus(task.status)) executedTaskIds.add(task.id);
-    }
-    send("plan", {
-      tasks: allTasks.map(taskSummary),
-      raw: "",
-      source: "resume"
-    });
-  } else {
-    const planningResult = await initialPlanning.runInitialPlanning({
-      req,
-      nextHandler,
-      baseBody,
-      messages,
-      config,
-      defaultConfig: DEFAULT_CONFIG,
-      commanderRoute,
-      goalId,
-      plannerMemory,
-      goalStrategy,
-      goalBudget,
-      trace,
-      send,
-      emitBudget,
-      appendTasks,
-      taskSummary,
-      startedAt,
-      callWithFallback,
-      persistGoalBudget,
-      normalizePromptSettings
-    });
-    if (planningResult.handled) {
-      return;
-    }
-    send("plan", {
-      tasks: allTasks.map(taskSummary),
-      raw: (planningResult.planAttempt && planningResult.planAttempt.content) || "",
-      source: "commander"
-    });
-  }
-
   const runWorkerTask = async (task) => {
     const runningTask = taskContext.startWorkerTask({
       goalId,
@@ -1842,7 +1419,7 @@ async function runAgentRouteEvents(req, body, nextHandler, send) {
       persistGoalBudget,
       send,
       taskSummary,
-      callWithFallback,
+      callRoutedModel,
       makeWorkerMessages,
       runCodexCliTask,
       shouldForwardCodexLog
@@ -1893,272 +1470,460 @@ async function runAgentRouteEvents(req, body, nextHandler, send) {
 
   let finalFromReview = "";
   let pausedTask = null;
-  for (let iteration = 1; iteration <= maxGoalIterations; iteration += 1) {
-    const { iterationBudget, budgetBlocked, strategyStop } = loopController.evaluateIterationGuards({
-      iteration,
-      goalBudget,
-      goalStrategy,
-      allTasks
-    });
-    if (iterationBudget.warnings.length || iterationBudget.degradationLevel !== budgetGovernor.DEGRADATION_LEVEL.NONE) {
-      emitBudget("iteration:" + iteration, iterationBudget);
-    }
-    if (budgetBlocked) {
-      const compactBudget = budgetGovernor.compactEvaluation(iterationBudget);
-      send("pause", {
-        goal_id: goalId,
-        status: TASK_STATUS.BLOCKED,
-        message: compactBudget.blockedReason || "Goal budget exhausted.",
-        budget: compactBudget,
-        elapsedMs: Date.now() - startedAt,
-        trace
-      });
-      return;
-    }
-    if (strategyStop.shouldStop) {
-      emitStrategy(strategyEngine.STRATEGY_EVENT.STOP_TRIGGERED, {
-        stop: strategyStop,
-        phase: "iteration:" + iteration
-      });
-      send("pause", {
-        goal_id: goalId,
-        status: TASK_STATUS.BLOCKED,
-        message: strategyStop.reasons.join(" ") || "Strategy stop condition triggered.",
-        strategy: goalStrategy,
-        elapsedMs: Date.now() - startedAt,
-        trace
-      });
-      return;
-    }
-    pausedTask =
-      allTasks.find((task) => isPausedTaskStatus(task)) ||
-      allTasks.find((task) => !isTerminalTaskStatus(task.status) && taskRequiresHumanAttention(task)) ||
-      null;
-    if (pausedTask) break;
+  let iteration = 0;
+  let selectedTask = null;
+  let drainedTasks = 0;
+  let maxReadyDrains = 0;
 
-    const drainResult = await taskExecutor.drainReadyTasks({
-      goalId,
-      iteration,
-      config,
-      defaultConfig: DEFAULT_CONFIG,
-      executedTaskIds,
-      allTasks,
-      runWorkerTask,
-      syncRuntimeTasks,
-      emitGraph,
-      trace
-    });
-    pausedTask = drainResult.pausedTask;
-    if (pausedTask) break;
+  const complete = (reason = "complete", extra = {}) => ({
+    done: true,
+    next: "complete",
+    reason,
+    goalId,
+    iteration,
+    ...extra
+  });
 
-    const reviewResult = await reviewRunner.runReviewIteration({
-      req,
-      nextHandler,
-      baseBody,
-      messages,
-      config,
-      defaultConfig: DEFAULT_CONFIG,
-      needsLocalExecution,
-      commanderRoute,
-      iteration,
-      maxGoalIterations,
-      goalId,
-      goalMemoryQuery,
-      allTasks,
-      workerResults,
-      goalBudget,
-      goalStrategy,
-      trace,
-      send,
-      emitBudget,
-      emitStrategy,
-      persistGoalBudget,
-      taskSummary,
-      callWithFallback,
-      normalizePromptSettings
-    });
-    goalStrategy = reviewResult.goalStrategy;
+  const continueTo = (next = "iteration", reason = "", extra = {}) => ({
+    done: false,
+    next,
+    reason,
+    goalId,
+    iteration,
+    ...extra
+  });
 
-    if (reviewResult.failed) {
-      const message = `Commander review failed: ${reviewResult.error || reviewResult.reviewAttempt.error || "unknown error"}`;
-      taskRuntime.setGoalStatus(goalId, TASK_STATUS.FAILED, { blockedReason: message });
-      send("error", {
-        message,
-        phase: "review",
-        model: reviewResult.reviewAttempt.model || commanderRoute.selected,
-        task: reviewResult.reviewTask ? taskSummary(reviewResult.reviewTask) : undefined,
-        elapsedMs: Date.now() - startedAt,
-        trace
-      });
-      return;
-    }
-
-    if (reviewResult.finalAnswer) {
-      const finalBlock = finalBlockedByUnresolvedPlannedTasks(allTasks);
-      if (finalBlock.blocked) {
-        const readyUnresolvedTaskIds = new Set(
-          taskRuntime
-            .readyTasks(goalId)
-            .filter((task) => !executedTaskIds.has(task.id))
-            .map((task) => task.id)
-        );
-        const canContinueDraining =
-          iteration < maxGoalIterations && finalBlock.tasks.some((task) => readyUnresolvedTaskIds.has(task.id));
-        trace.push({
-          label: `goal-review:${iteration}:final-blocked`,
-          model: "dependency-engine",
-          ok: false,
-          error: finalBlock.message,
-          unresolvedTasks: finalBlock.tasks.slice(0, 8).map(taskSummary)
-        });
-        send("goal_check", {
-          iteration,
-          ok: false,
-          status: "continue",
-          progress_summary: finalBlock.message,
-          next_count: reviewResult.review.nextTasks.length,
-          commander_model: reviewResult.reviewAttempt.model || commanderRoute.selected,
-          failure_reason: "planned_tasks_unresolved_before_final"
-        });
-        if (reviewResult.review.nextTasks.length) {
-          appendTasks(reviewResult.review.nextTasks, {
-            source: "review",
-            createdByTaskId: `goal-review-${iteration}`,
-            createdByTaskTitle: "Review progress and decide next step"
-          });
-          send("plan", {
-            tasks: allTasks.map(taskSummary),
-            raw: reviewResult.reviewAttempt.content || ""
-          });
-          continue;
+  return {
+    goalId,
+    startedAt,
+    trace,
+    async plan() {
+      if (resumeGoal) {
+        const existingTasks = taskRuntime.listTasks(goalId);
+        for (const task of existingTasks) {
+          knownTaskIds.add(task.id);
+          allTasks.push(task);
+          if (isTerminalTaskStatus(task.status)) executedTaskIds.add(task.id);
         }
-        if (canContinueDraining) continue;
-        pausedTask = {
-          ...finalBlock.task,
-          status: finalBlock.status,
-          blockedReason: finalBlock.message
-        };
-        break;
+        send("plan", {
+          tasks: allTasks.map(taskSummary),
+          raw: "",
+          source: "resume"
+        });
+        emitCheckpoint("resume_loaded");
+        return continueTo("begin_iteration", "resume_loaded");
       }
-      finalFromReview = reviewResult.finalAnswer;
-      break;
-    }
 
-    if (reviewResult.review.nextTasks.length && reviewResult.shouldContinue) {
-      appendTasks(reviewResult.review.nextTasks, {
-        source: "review",
-        createdByTaskId: `goal-review-${iteration}`,
-        createdByTaskTitle: "Review progress and decide next step"
+      const planningResult = await initialPlanning.runInitialPlanning({
+        req,
+        nextHandler,
+        baseBody,
+        messages,
+        config,
+        defaultConfig: DEFAULT_CONFIG,
+        commanderRoute,
+        goalId,
+        plannerMemory,
+        goalStrategy,
+        goalBudget,
+        trace,
+        send,
+        emitBudget,
+        appendTasks,
+        taskSummary,
+        startedAt,
+        callRoutedModel,
+        persistGoalBudget,
+        normalizePromptSettings
       });
+      if (planningResult.handled) {
+        emitCheckpoint(planningResult.reason || "planning_handled");
+        return complete(planningResult.reason || "planning_handled");
+      }
       send("plan", {
         tasks: allTasks.map(taskSummary),
-        raw: reviewResult.reviewAttempt.content || ""
+        raw: (planningResult.planAttempt && planningResult.planAttempt.content) || "",
+        source: "commander"
       });
-      continue;
+      emitCheckpoint("plan_ready");
+      return continueTo("begin_iteration", "plan_ready");
+    },
+    async beginIteration() {
+      if (iteration >= maxGoalIterations) return continueTo("finalize", "max_iterations_reached");
+      iteration += 1;
+      selectedTask = null;
+      drainedTasks = 0;
+      maxReadyDrains = Math.max(1, Math.min(60, Number(config.maxTasks || DEFAULT_CONFIG.maxTasks) * 6));
+      const { iterationBudget, budgetBlocked, strategyStop } = loopController.evaluateIterationGuards({
+        iteration,
+        goalBudget,
+        goalStrategy,
+        allTasks
+      });
+      if (
+        iterationBudget.warnings.length ||
+        iterationBudget.degradationLevel !== budgetGovernor.DEGRADATION_LEVEL.NONE
+      ) {
+        emitBudget("iteration:" + iteration, iterationBudget);
+      }
+      if (budgetBlocked) {
+        const compactBudget = budgetGovernor.compactEvaluation(iterationBudget);
+        taskRuntime.setGoalStatus(goalId, TASK_STATUS.BLOCKED, {
+          blockedReason: compactBudget.blockedReason || "Goal budget exhausted.",
+          output: compactBudget.blockedReason || "Goal budget exhausted."
+        });
+        send("pause", {
+          goal_id: goalId,
+          status: TASK_STATUS.BLOCKED,
+          message: compactBudget.blockedReason || "Goal budget exhausted.",
+          budget: compactBudget,
+          elapsedMs: Date.now() - startedAt,
+          trace
+        });
+        emitCheckpoint("goal_budget_blocked");
+        return complete("goal_budget_blocked");
+      }
+      if (strategyStop.shouldStop) {
+        taskRuntime.setGoalStatus(goalId, TASK_STATUS.BLOCKED, {
+          blockedReason: strategyStop.reasons.join(" ") || "Strategy stop condition triggered.",
+          output: strategyStop.reasons.join(" ") || "Strategy stop condition triggered."
+        });
+        emitStrategy(strategyEngine.STRATEGY_EVENT.STOP_TRIGGERED, {
+          stop: strategyStop,
+          phase: "iteration:" + iteration
+        });
+        send("pause", {
+          goal_id: goalId,
+          status: TASK_STATUS.BLOCKED,
+          message: strategyStop.reasons.join(" ") || "Strategy stop condition triggered.",
+          strategy: goalStrategy,
+          elapsedMs: Date.now() - startedAt,
+          trace
+        });
+        emitCheckpoint("strategy_stop");
+        return complete("strategy_stop");
+      }
+      pausedTask =
+        allTasks.find((task) => isPausedTaskStatus(task)) ||
+        allTasks.find((task) => !isTerminalTaskStatus(task.status) && taskRequiresHumanAttention(task)) ||
+        null;
+      if (pausedTask) return continueTo("finalize", "paused_task");
+
+      return continueTo("select_task", "iteration_started", {
+        drainedTasks,
+        maxReadyDrains
+      });
+    },
+    async selectReadyTask() {
+      const graphBeforeRun = emitGraph(dependencyEngine.GRAPH_EVENT.READY_CHANGED, {
+        phase: `iteration:${iteration}`,
+        drained_tasks: drainedTasks
+      });
+      syncRuntimeTasks();
+      const pendingTasks = taskRuntime.readyTasks(goalId).filter((task) => !executedTaskIds.has(task.id));
+      if (!pendingTasks.length) {
+        selectedTask = null;
+        if (!drainedTasks && graphBeforeRun.blockedChains && graphBeforeRun.blockedChains.length) {
+          trace.push({
+            label: `graph:blocked:${iteration}`,
+            model: "dependency-engine",
+            ok: false,
+            blockedChains: graphBeforeRun.blockedChains.slice(0, 8)
+          });
+        }
+        return continueTo("review", "no_ready_tasks", {
+          drainedTasks,
+          readyCount: 0
+        });
+      }
+      selectedTask = pendingTasks[0];
+      return continueTo("run_task", "ready_task_selected", {
+        taskId: selectedTask.id,
+        readyCount: pendingTasks.length,
+        drainedTasks
+      });
+    },
+    async runReadyTask() {
+      if (!selectedTask) {
+        return continueTo("select_task", "no_selected_task", {
+          drainedTasks,
+          maxReadyDrains
+        });
+      }
+      const task = selectedTask;
+      selectedTask = null;
+      const result = await runWorkerTask(task);
+      drainedTasks += 1;
+      syncRuntimeTasks();
+      emitGraph(dependencyEngine.GRAPH_EVENT.UPDATED, { task_id: task.id, status: result.status });
+      const propagatedPausedTask = allTasks.find((item) => isPausedTaskStatus(item));
+      if (propagatedPausedTask) {
+        pausedTask = propagatedPausedTask;
+        return continueTo("finalize", "propagated_paused_task", {
+          taskId: propagatedPausedTask.id || task.id,
+          drainedTasks
+        });
+      }
+      if (isPausedTaskStatus(result.task || { status: result.status, blockedReason: result.blockedReason })) {
+        pausedTask = result.task || task;
+        return continueTo("finalize", "worker_paused", {
+          taskId: task.id,
+          drainedTasks
+        });
+      }
+      if (drainedTasks >= maxReadyDrains) {
+        trace.push({
+          label: `graph:drain-limit:${iteration}`,
+          model: "dependency-engine",
+          ok: false,
+          drainedTasks,
+          maxReadyDrains
+        });
+        return continueTo("review", "drain_limit_reached", {
+          taskId: task.id,
+          drainedTasks,
+          maxReadyDrains
+        });
+      }
+      return continueTo("select_task", "ready_task_completed", {
+        taskId: task.id,
+        drainedTasks,
+        maxReadyDrains
+      });
+    },
+    async reviewIteration() {
+      const reviewResult = await reviewRunner.runReviewIteration({
+        req,
+        nextHandler,
+        baseBody,
+        messages,
+        config,
+        defaultConfig: DEFAULT_CONFIG,
+        needsLocalExecution,
+        commanderRoute,
+        iteration,
+        maxGoalIterations,
+        goalId,
+        goalMemoryQuery,
+        allTasks,
+        workerResults,
+        goalBudget,
+        goalStrategy,
+        trace,
+        send,
+        emitBudget,
+        emitStrategy,
+        persistGoalBudget,
+        taskSummary,
+        callRoutedModel,
+        normalizePromptSettings
+      });
+      goalStrategy = reviewResult.goalStrategy;
+
+      if (reviewResult.failed) {
+        const message = `Commander review failed: ${reviewResult.error || reviewResult.reviewAttempt.error || "unknown error"}`;
+        taskRuntime.setGoalStatus(goalId, TASK_STATUS.FAILED, { blockedReason: message, output: message });
+        send("error", {
+          message,
+          phase: "review",
+          model: reviewResult.reviewAttempt.model || commanderRoute.selected,
+          task: reviewResult.reviewTask ? taskSummary(reviewResult.reviewTask) : undefined,
+          elapsedMs: Date.now() - startedAt,
+          trace
+        });
+        emitCheckpoint("review_failed");
+        return complete("review_failed");
+      }
+
+      if (reviewResult.finalAnswer) {
+        const finalBlock = finalBlockedByUnresolvedPlannedTasks(allTasks);
+        if (finalBlock.blocked) {
+          const readyUnresolvedTaskIds = new Set(
+            taskRuntime
+              .readyTasks(goalId)
+              .filter((task) => !executedTaskIds.has(task.id))
+              .map((task) => task.id)
+          );
+          const canContinueDraining =
+            iteration < maxGoalIterations && finalBlock.tasks.some((task) => readyUnresolvedTaskIds.has(task.id));
+          trace.push({
+            label: `goal-review:${iteration}:final-blocked`,
+            model: "dependency-engine",
+            ok: false,
+            error: finalBlock.message,
+            unresolvedTasks: finalBlock.tasks.slice(0, 8).map(taskSummary)
+          });
+          send("goal_check", {
+            iteration,
+            ok: false,
+            status: "continue",
+            progress_summary: finalBlock.message,
+            next_count: reviewResult.review.nextTasks.length,
+            commander_model: reviewResult.reviewAttempt.model || commanderRoute.selected,
+            failure_reason: "planned_tasks_unresolved_before_final"
+          });
+          if (reviewResult.review.nextTasks.length) {
+            appendTasks(reviewResult.review.nextTasks, {
+              source: "review",
+              createdByTaskId: `goal-review-${iteration}`,
+              createdByTaskTitle: "Review progress and decide next step"
+            });
+            send("plan", {
+              tasks: allTasks.map(taskSummary),
+              raw: reviewResult.reviewAttempt.content || ""
+            });
+            emitCheckpoint("review_appended_tasks");
+            return continueTo("begin_iteration", "review_appended_tasks");
+          }
+          if (canContinueDraining) return continueTo("begin_iteration", "final_block_has_ready_tasks");
+          pausedTask = {
+            ...finalBlock.task,
+            status: finalBlock.status,
+            blockedReason: finalBlock.message
+          };
+          return continueTo("finalize", "final_blocked");
+        }
+        finalFromReview = reviewResult.finalAnswer;
+        return continueTo("finalize", "final_from_review");
+      }
+
+      if (reviewResult.review.nextTasks.length && reviewResult.shouldContinue) {
+        appendTasks(reviewResult.review.nextTasks, {
+          source: "review",
+          createdByTaskId: `goal-review-${iteration}`,
+          createdByTaskTitle: "Review progress and decide next step"
+        });
+        send("plan", {
+          tasks: allTasks.map(taskSummary),
+          raw: reviewResult.reviewAttempt.content || ""
+        });
+        emitCheckpoint("review_appended_tasks");
+        return continueTo("begin_iteration", "review_appended_tasks");
+      }
+
+      if (!reviewResult.review.nextTasks.length && reviewResult.shouldContinue) {
+        emitCheckpoint("review_continue");
+        return continueTo("begin_iteration", "review_continue");
+      }
+
+      return continueTo("finalize", "review_complete");
+    },
+    async finalize() {
+      if (pausedTask) {
+        const waitingForHuman = taskRequiresHumanAttention(pausedTask);
+        const pauseStatus = waitingForHuman ? TASK_STATUS.WAITING_HUMAN : pausedTask.status;
+        send("pause", {
+          goal_id: goalId,
+          status: pauseStatus,
+          task: taskSummary(pausedTask),
+          message: waitingForHuman
+            ? pausedTask.approvalReason || "Task is waiting for human approval."
+            : pausedTask.blockedReason || pausedTask.error || "Task is blocked by an external issue.",
+          elapsedMs: Date.now() - startedAt,
+          trace
+        });
+        taskRuntime.setGoalStatus(goalId, pauseStatus, {
+          blockedReason: waitingForHuman
+            ? pausedTask.approvalReason || "Task is waiting for human approval."
+            : pausedTask.blockedReason || pausedTask.error || "Task is blocked by an external issue.",
+          output: waitingForHuman
+            ? pausedTask.approvalReason || "Task is waiting for human approval."
+            : pausedTask.blockedReason || pausedTask.error || "Task is blocked by an external issue."
+        });
+        emitCheckpoint("paused");
+        return complete("paused");
+      }
+
+      const routeSuccessfulWorkers = workerResults.filter((result) => result.ok);
+      if (finalFromReview) {
+        const finalStatus = finalGoalStatusFromTasks(finalFromReview, allTasks);
+        send("final", {
+          content: finalFromReview,
+          status: finalStatus.status,
+          finalStatus: finalStatus.status,
+          final_status: finalStatus.status,
+          blockedReason: finalStatus.blockedReason,
+          failureReason: finalStatus.blockedReason,
+          source_model: commanderRoute.selected,
+          commander_model: commanderRoute.selected,
+          elapsedMs: Date.now() - startedAt,
+          trace
+        });
+        taskRuntime.setGoalStatus(goalId, finalStatus.status, {
+          blockedReason: finalStatus.blockedReason,
+          output: finalFromReview
+        });
+        emitCheckpoint("final_from_review");
+        return complete("final_from_review");
+      }
+
+      if (routeSuccessfulWorkers.length === 0) {
+        const blocked = blockedWhenNoSuccessfulWorkerEvidence(allTasks);
+        taskRuntime.setGoalStatus(goalId, blocked.status, { blockedReason: blocked.message, output: blocked.message });
+        send("pause", {
+          goal_id: goalId,
+          status: blocked.status,
+          task: blocked.task ? taskSummary(blocked.task) : undefined,
+          message: blocked.message,
+          elapsedMs: Date.now() - startedAt,
+          trace
+        });
+        emitCheckpoint("no_successful_worker_evidence");
+        return complete("no_successful_worker_evidence");
+      }
+
+      const finalBlock = finalBlockedByUnresolvedPlannedTasks(allTasks);
+      if (finalBlock.blocked) {
+        taskRuntime.setGoalStatus(goalId, finalBlock.status, {
+          blockedReason: finalBlock.message,
+          output: finalBlock.message
+        });
+        send("pause", {
+          goal_id: goalId,
+          status: finalBlock.status,
+          task: finalBlock.task ? taskSummary(finalBlock.task) : undefined,
+          message: finalBlock.message,
+          elapsedMs: Date.now() - startedAt,
+          trace
+        });
+        emitCheckpoint("final_blocked");
+        return complete("final_blocked");
+      }
+
+      const finalResult = await finalizer.runFinalSynthesis({
+        req,
+        nextHandler,
+        baseBody,
+        messages,
+        allTasks,
+        workerResults,
+        config,
+        defaultConfig: DEFAULT_CONFIG,
+        needsLocalExecution,
+        commanderRoute,
+        goalId,
+        goalMemoryQuery,
+        goalBudget,
+        goalStrategy,
+        trace,
+        send,
+        emitBudget,
+        persistGoalBudget,
+        taskSummary,
+        callRoutedModel,
+        startedAt,
+        classifyFinalStatus: finalGoalStatusFromTasks,
+        normalizePromptSettings
+      });
+      const finalStatus = finalGoalStatusFromTasks(finalResult.content, allTasks);
+      taskRuntime.setGoalStatus(goalId, finalStatus.status, {
+        blockedReason: finalStatus.blockedReason,
+        output: finalResult.content || finalStatus.blockedReason
+      });
+      emitCheckpoint("final");
+      return complete("final");
     }
-
-    if (!reviewResult.review.nextTasks.length && reviewResult.shouldContinue) {
-      continue;
-    }
-
-    break;
-  }
-
-  if (pausedTask) {
-    const waitingForHuman = taskRequiresHumanAttention(pausedTask);
-    const pauseStatus = waitingForHuman ? TASK_STATUS.WAITING_HUMAN : pausedTask.status;
-    send("pause", {
-      goal_id: goalId,
-      status: pauseStatus,
-      task: taskSummary(pausedTask),
-      message: waitingForHuman
-        ? pausedTask.approvalReason || "Task is waiting for human approval."
-        : pausedTask.blockedReason || pausedTask.error || "Task is blocked by an external issue.",
-      elapsedMs: Date.now() - startedAt,
-      trace
-    });
-    taskRuntime.setGoalStatus(goalId, pauseStatus, {
-      blockedReason: waitingForHuman
-        ? pausedTask.approvalReason || "Task is waiting for human approval."
-        : pausedTask.blockedReason || pausedTask.error || "Task is blocked by an external issue."
-    });
-    return;
-  }
-
-  const routeSuccessfulWorkers = workerResults.filter((result) => result.ok);
-  if (finalFromReview) {
-    const finalStatus = finalGoalStatusFromTasks(finalFromReview, allTasks);
-    send("final", {
-      content: finalFromReview,
-      status: finalStatus.status,
-      finalStatus: finalStatus.status,
-      final_status: finalStatus.status,
-      blockedReason: finalStatus.blockedReason,
-      failureReason: finalStatus.blockedReason,
-      source_model: commanderRoute.selected,
-      commander_model: commanderRoute.selected,
-      elapsedMs: Date.now() - startedAt,
-      trace
-    });
-    taskRuntime.setGoalStatus(goalId, finalStatus.status, { blockedReason: finalStatus.blockedReason });
-    return;
-  }
-
-  if (routeSuccessfulWorkers.length === 0) {
-    const blocked = blockedWhenNoSuccessfulWorkerEvidence(allTasks);
-    taskRuntime.setGoalStatus(goalId, blocked.status, { blockedReason: blocked.message });
-    send("pause", {
-      goal_id: goalId,
-      status: blocked.status,
-      task: blocked.task ? taskSummary(blocked.task) : undefined,
-      message: blocked.message,
-      elapsedMs: Date.now() - startedAt,
-      trace
-    });
-    return;
-  }
-
-  const finalBlock = finalBlockedByUnresolvedPlannedTasks(allTasks);
-  if (finalBlock.blocked) {
-    taskRuntime.setGoalStatus(goalId, finalBlock.status, { blockedReason: finalBlock.message });
-    send("pause", {
-      goal_id: goalId,
-      status: finalBlock.status,
-      task: finalBlock.task ? taskSummary(finalBlock.task) : undefined,
-      message: finalBlock.message,
-      elapsedMs: Date.now() - startedAt,
-      trace
-    });
-    return;
-  }
-
-  const finalResult = await finalizer.runFinalSynthesis({
-    req,
-    nextHandler,
-    baseBody,
-    messages,
-    allTasks,
-    workerResults,
-    config,
-    defaultConfig: DEFAULT_CONFIG,
-    needsLocalExecution,
-    commanderRoute,
-    goalId,
-    goalMemoryQuery,
-    goalBudget,
-    goalStrategy,
-    trace,
-    send,
-    emitBudget,
-    persistGoalBudget,
-    taskSummary,
-    callWithFallback,
-    startedAt,
-    classifyFinalStatus: finalGoalStatusFromTasks,
-    normalizePromptSettings
-  });
-  const finalStatus = finalGoalStatusFromTasks(finalResult.content, allTasks);
-  taskRuntime.setGoalStatus(goalId, finalStatus.status, { blockedReason: finalStatus.blockedReason });
+  };
 }
 
 async function parseAgentRouteRequestBody(req) {
@@ -2268,15 +2033,16 @@ async function handleAgentRouteUiStream(req, nextHandler) {
 
   const prepared = prepareAgentRouteChatBody(body, req);
   if (prepared.response) return prepared.response;
+  const runReq = detachedRequestFromClientAbort(req);
 
   return streamAgentRouteUiMessages(
     (send) =>
       langGraphRunner.runAgentRouteLangGraph({
-        req,
+        req: runReq,
         body: prepared.chatBody,
         nextHandler,
         send,
-        runAgentRouteEvents
+        createRuntimeSession: createAgentRouteRuntimeSession
       }),
     req
   );
@@ -2289,11 +2055,10 @@ module.exports = {
   DEFAULT_CONFIG,
   DEFAULT_MODEL_POOLS,
   DEFAULT_PROMPT_SETTINGS,
-  callWithFallback,
+  callRoutedModel,
   handleAgentRouteRun,
   handleAgentRouteUiStream,
   finalBlockedByUnresolvedPlannedTasks,
   finalGoalStatusFromTasks,
-  retryMaxTokenLimitForProviderError,
-  runAgentChat
+  retryMaxTokenLimitForProviderError
 };

@@ -7,12 +7,14 @@ const z = require("zod/v4");
 
 const browserWorker = require("../orchestrator/browser-worker");
 const documentWorker = require("../orchestrator/document-worker");
+const localReadWorker = require("../orchestrator/local-read-worker");
 const webToolWorker = require("../orchestrator/web-tool-worker");
 
 const WORKER_MCP_TOOLS = Object.freeze({
   document: "agentroute.worker.document",
   web: "agentroute.worker.web",
   browser: "agentroute.worker.browser",
+  files: "agentroute.worker.files",
   codex: "agentroute.worker.codex"
 });
 
@@ -167,6 +169,29 @@ function registerWorkerTools(server, handlers = {}) {
     async ({ task = {}, config = {} }) =>
       executeWorkerTool(WORKER_MCP_TOOLS.browser, () =>
         browserWorker.runBrowserWorker(asObject(task), asObject(config))
+      )
+  );
+
+  server.registerTool(
+    WORKER_MCP_TOOLS.files,
+    {
+      title: "Run AgentRoute Local Files Worker",
+      description:
+        "Collect read-only local filesystem evidence through the internal AgentRoute worker boundary. External MCP clients never receive this tool.",
+      inputSchema: {
+        task: workerInputSchema.task,
+        config: workerInputSchema.config
+      },
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false
+      }
+    },
+    async ({ task = {}, config = {} }) =>
+      executeWorkerTool(WORKER_MCP_TOOLS.files, () =>
+        localReadWorker.runLocalReadWorker(asObject(task), asObject(config))
       )
   );
 

@@ -14,7 +14,6 @@ const decisionAttribution = require("../decision-attribution");
 const observabilityRuntime = require("../observability");
 const recoveryRuntime = require("../recovery");
 const configLoader = require("../../config/loader");
-const providerSettings = require("../../core/providers");
 const { corsHeaders } = require("../../security/cors");
 const { messagesToText } = require("./content-utils");
 const modelRoutingService = require("./model-routing-service");
@@ -123,49 +122,23 @@ function countTasksByStatus(tasks = []) {
   }, {});
 }
 
-function derivedGoalStatus(goal = {}, tasks = []) {
-  const stored = goal.status || "";
-  if (!tasks.length) return stored;
-  const statuses = tasks.map((task) => String(task.status || "").toLowerCase());
-  if (statuses.some((status) => status === "running")) return "running";
-  if (statuses.some((status) => status === "waiting_human" || status === "awaiting_confirmation"))
-    return "waiting_human";
-  if (statuses.some((status) => status === "blocked")) return "blocked";
-  if (statuses.every((status) => status === "completed" || status === "done")) return "completed";
-  if (statuses.every((status) => ["failed", "canceled", "cancelled"].includes(status))) return "failed";
-  if (
-    stored === "running" &&
-    statuses.every((status) => ["completed", "done", "failed", "blocked", "canceled", "cancelled"].includes(status))
-  ) {
-    return statuses.some((status) => status === "failed") ? "failed" : "blocked";
-  }
-  return stored || "waiting";
+function storedGoalStatus(goal = {}) {
+  return String(goal.status || "").toLowerCase() || "waiting";
 }
 
-function derivedGoalBlockedReason(goal = {}, tasks = [], status = "") {
-  if (goal.blockedReason || goal.blocked_reason) return goal.blockedReason || goal.blocked_reason;
-  if (
-    status === "failed" &&
-    tasks.length &&
-    tasks.every((task) => String(task.status || "").toLowerCase() === "failed")
-  ) {
-    return "所有任务都失败，目标没有可继续执行的任务。";
-  }
-  if (status === "blocked") {
-    const task = tasks.find((item) => item.blockedReason || item.error);
-    return task ? task.blockedReason || task.error : "目标存在阻塞任务。";
-  }
-  return "";
+function storedGoalBlockedReason(goal = {}) {
+  return goal.blockedReason || goal.blocked_reason || "";
 }
 
 function compactGoalForActionApi(goal = {}, options = {}) {
   const tasks = Array.isArray(goal.tasks) ? goal.tasks : [];
   const summarizedTasks = options.includeTasks === false ? [] : tasks.map(taskSummary);
-  const status = derivedGoalStatus(goal, tasks);
+  const status = storedGoalStatus(goal);
   return {
     goalId: goal.goalId || goal.goal_id || "",
     status,
-    blockedReason: derivedGoalBlockedReason(goal, tasks, status),
+    blockedReason: storedGoalBlockedReason(goal),
+    output: goal.output || "",
     recoverySummary: goal.recoverySummary || goal.recovery_summary || null,
     createdAt: goal.createdAt || goal.created_at || "",
     updatedAt: goal.updatedAt || goal.updated_at || "",
@@ -211,64 +184,34 @@ async function handleAgentRouteAction(body, requestOrOrigin = null) {
         warnings: config.configWarnings || []
       });
     }
-    if (action === "provider_status" || action === "providers" || action === "list_providers") {
-      const status = providerSettings.providerStatus();
-      return response({
-        ok: status.ok,
-        providerSettings: status,
-        providers: status.connections,
-        supportedProviders: status.supportedProviders
-      });
-    }
-    if (action === "save_provider" || action === "upsert_provider") {
-      const status = providerSettings.upsertProviderConnection(
-        body.providerConnection && typeof body.providerConnection === "object" ? body.providerConnection : body
+    if (
+      [
+        "provider_status",
+        "providers",
+        "list_providers",
+        "save_provider",
+        "upsert_provider",
+        "delete_provider",
+        "remove_provider",
+        "test_provider",
+        "test_provider_connection",
+        "save_provider_node",
+        "upsert_provider_node",
+        "delete_provider_node",
+        "remove_provider_node"
+      ].includes(action)
+    ) {
+      return response(
+        {
+          ok: false,
+          error: {
+            message: "Legacy provider and OAuth management has been removed. Use /agent-route#model-apis.",
+            code: "legacy_provider_removed",
+            type: "invalid_request_error"
+          }
+        },
+        410
       );
-      return response({
-        ok: true,
-        providerSettings: status,
-        providers: status.connections,
-        supportedProviders: status.supportedProviders
-      });
-    }
-    if (action === "delete_provider" || action === "remove_provider") {
-      const status = providerSettings.deleteProviderConnection(body.provider_id || body.providerId || body.id);
-      return response({
-        ok: true,
-        providerSettings: status,
-        providers: status.connections,
-        supportedProviders: status.supportedProviders
-      });
-    }
-    if (action === "test_provider" || action === "test_provider_connection") {
-      const result = providerSettings.testProviderConnection(body.provider_id || body.providerId || body.id);
-      return response({
-        ok: true,
-        ...result,
-        providerSettings: result.providerSettings,
-        providers: result.providerSettings.connections,
-        supportedProviders: result.providerSettings.supportedProviders
-      });
-    }
-    if (action === "save_provider_node" || action === "upsert_provider_node") {
-      const status = providerSettings.upsertProviderNode(
-        body.providerNode && typeof body.providerNode === "object" ? body.providerNode : body
-      );
-      return response({
-        ok: true,
-        providerSettings: status,
-        providerNodes: status.providerNodes,
-        supportedProviders: status.supportedProviders
-      });
-    }
-    if (action === "delete_provider_node" || action === "remove_provider_node") {
-      const status = providerSettings.deleteProviderNode(body.provider_node_id || body.providerNodeId || body.id);
-      return response({
-        ok: true,
-        providerSettings: status,
-        providerNodes: status.providerNodes,
-        supportedProviders: status.supportedProviders
-      });
     }
     if (action === "recovery_status" || action === "runtime_recovery_status") {
       return response({
@@ -284,6 +227,23 @@ async function handleAgentRouteAction(body, requestOrOrigin = null) {
       return response({
         ok: !recovery.errors.length,
         recovery
+      });
+    }
+    if (
+      action === "reset_agent_route" ||
+      action === "reset_agent_history" ||
+      action === "clear_agent_history" ||
+      action === "clear_history"
+    ) {
+      taskRuntime.resetRuntime();
+      observabilityRuntime.resetRuntime();
+      recoveryRuntime.resetRecoveryRuntime();
+      return response({
+        ok: true,
+        goals: [],
+        tasks: [],
+        observability: observabilityRuntime.snapshot({ limit: body.limit || 200 }),
+        recovery: recoveryRuntime.recoveryStatus()
       });
     }
     if (action === "list_goals" || action === "goals") {

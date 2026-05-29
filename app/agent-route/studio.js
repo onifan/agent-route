@@ -4,22 +4,20 @@ import { DefaultChatTransport } from "ai";
 import { useEffect, useMemo, useRef, useState } from "react";
 import * as promptDefaults from "../../src/config/prompts/default-prompt-settings";
 import AgentRouteChatPanel from "./chat/agent-chat";
-import ProviderDetailPage from "../dashboard/providers/[id]/page";
-import ProvidersDashboard from "../dashboard/providers/provider-console";
 
 const AGENT_ROUTE_UI_STREAM_API = "/api/agent-route/ui-stream";
 const STORAGE_KEY = "agent-route.dashboard.v3";
 const FALLBACK_STORAGE_KEY = "agent-route.studio.state.v1";
 const COMMANDER_KEY = "agent-route.commander";
 const MODEL_SETTINGS_KEY = "agent-route.model-settings.v1";
-const MODEL_SETTINGS_VERSION = 2;
+const MODEL_SETTINGS_VERSION = 3;
 const PROMPT_SETTINGS_KEY = "agent-route.prompt-settings.v1";
 const BUDGET_SETTINGS_KEY = "agent-route.budget-settings.v1";
 const THEME_KEY = "agent-route.theme";
 
 function normalizeCommanderModelId(value) {
   const model = String(value || "").trim();
-  if (/^(?:cx|codex)\/gpt-?5\.5$/i.test(model) || /^gpt-?5\.5$/i.test(model)) return "gpt5.5";
+  if (/^(?:cx|codex|local|openai)\/gpt-?5\.5$/i.test(model) || /^gpt-?5\.5$/i.test(model)) return "gpt5.5";
   return model;
 }
 
@@ -81,35 +79,29 @@ const MODEL_TIERS = [
 const DEFAULT_MODEL_POOLS = {
   commander: COMMANDERS.map((item) => item.id),
   strong: [
-    "openrouter/anthropic/claude-sonnet-4.5",
-    "openrouter/google/gemini-2.5-pro",
-    "openrouter/deepseek/deepseek-r1-0528",
-    "openrouter/qwen/qwen3-235b-a22b",
-    "openrouter/moonshotai/kimi-k2"
+    "openai/gpt-5.5",
+    "claude/claude-sonnet-4-5",
+    "gemini/gemini-2.5-pro",
+    "grok/grok-4",
+    "deepseek/deepseek-v4-pro",
+    "qwen/qwen-plus",
+    "glm/glm-5.1",
+    "kimi/kimi-k2.5"
   ],
   coding: [
-    "openrouter/qwen/qwen3-coder:free",
-    "openrouter/deepseek/deepseek-r1-0528:free",
-    "openrouter/deepseek/deepseek-chat-v3.1:free",
-    "openrouter/qwen/qwen3-32b:free",
-    "openrouter/mistralai/mistral-small-3.2-24b-instruct:free"
+    "qwen/qwen3-coder-plus",
+    "deepseek/deepseek-v4-flash",
+    "glm/glm-4.7",
+    "kimi/kimi-k2.5",
+    "gemini/gemini-2.5-flash"
   ],
   free: [
-    "gc/gemini-3-flash-preview",
-    "gemini/gemini-3-flash-preview",
-    "gemini/gemini-3.1-flash-lite-preview",
-    "gemini/gemma-4-31b-it",
     "gemini/gemini-2.5-flash",
     "gemini/gemini-2.5-flash-lite",
-    "openrouter/z-ai/glm-4.5-air:free",
-    "openrouter/openai/gpt-oss-120b:free",
-    "openrouter/qwen/qwen3-next-80b-a3b-instruct:free",
-    "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
-    "openrouter/deepseek/deepseek-v4-flash:free",
-    "openrouter/minimax/minimax-m2.5:free",
-    "openrouter/meta-llama/llama-3.3-70b-instruct:free",
-    "openrouter/openai/gpt-oss-20b:free",
-    "openrouter/google/gemma-4-26b-a4b-it:free"
+    "qwen/qwen-plus",
+    "deepseek/deepseek-v4-flash",
+    "glm/glm-4.5",
+    "kimi/moonshot-v1-128k"
   ]
 };
 
@@ -156,7 +148,7 @@ const NAV_ITEMS = [
   ["chat", "聊天", "forum", "消息流和内部过程"],
   ["monitor", "监控中心", "monitoring", "运行状态和事件流"],
   ["models", "模型管理", "robot_2", "模型等级和预算"],
-  ["providers", "供应商设置", "key", "供应商、API Key 和自定义模型端点"],
+  ["model-apis", "模型 API", "key", "官方 API、Key 和第三方 Base URL"],
   ["memory", "记忆", "database", "长期经验"],
   ["logs", "执行日志", "terminal", "最近执行记录"]
 ];
@@ -164,8 +156,8 @@ const NAV_ITEMS = [
 const PROMPT_PREVIEW_APPENDICES = {
   planner: [
     "[运行时] 系统会追加当前 strategy、相关 memory、预算策略和执行上下文。",
-    "[运行时] planner 必须判断风险和难度，表达依赖关系，并返回任务图 JSON schema。",
-    "[运行时] 公开网页/API 只读取证必须路由到 web tool worker；模型只分析工具返回的 URL/status/title/text/API evidence。浏览器交互、shell、文件和本地应用任务才路由到 codex-cli/具备浏览器能力的 worker。"
+    "[运行时] planner 必须判断风险和难度，表达依赖关系，并通过强制 function calling 提交任务图参数。",
+    "[运行时] 公开网页/API 只读取证必须路由到 web tool worker；本地文件只读取证必须路由到 files tool worker；模型只分析工具返回的 evidence。浏览器交互、shell、本地修改和本地应用任务才路由到 codex-cli/具备浏览器能力的 worker。"
   ],
   worker: [
     "[运行时] 系统会追加分配任务的标题、描述、风险状态、确认状态、成功标准、依赖、产物和原始对话。",
@@ -180,7 +172,7 @@ const PROMPT_PREVIEW_APPENDICES = {
   verifier: [
     "[运行时] 语义验证器 prompt 由系统控制，不在这里编辑。",
     "[运行时] 规则验证先运行；语义验证不能覆盖缺失的 shell、browser、file、API、approval 或 risk 证据。",
-    '[运行时] 验证器期望 JSON: {"verified":boolean,"verificationStatus":"verified|partially_verified|unverified","confidence":0.0,"reasons":[],"detectedIssues":[],"reasonCode":"short","missingEvidence":[],"rejectedEvidence":[],"suggestedNextState":"completed|retrying|needs_evidence|failed|blocked|waiting_human","retryable":true}.'
+    '[运行时] 验证器通过强制 function calling 提交 arguments: {"verified":boolean,"verificationStatus":"verified|partially_verified|unverified","confidence":0.0,"reasons":[],"detectedIssues":[],"reasonCode":"short","missingEvidence":[],"rejectedEvidence":[],"suggestedNextState":"completed|retrying|needs_evidence|failed|blocked|waiting_human","retryable":true}.'
   ],
   final: [
     "[运行时] 系统会追加原始对话、完整任务计划、strategy、memory 和 worker 结果。",
@@ -188,23 +180,119 @@ const PROMPT_PREVIEW_APPENDICES = {
   ]
 };
 
-const FALLBACK_SUPPORTED_PROVIDERS = [
-  { id: "claude", label: "Claude Code", alias: "cc", authType: "oauth", category: "oauth", modelPrefixes: ["cc"] },
-  { id: "codex", label: "OpenAI Codex", alias: "cx", authType: "oauth", category: "oauth", modelPrefixes: ["cx"] },
-  { id: "gemini-cli", label: "Gemini CLI", alias: "gc", authType: "oauth", category: "oauth", modelPrefixes: ["gc"] },
-  { id: "github", label: "GitHub Copilot", alias: "gh", authType: "oauth", category: "oauth", modelPrefixes: ["gh"] },
-  { id: "antigravity", label: "Antigravity", alias: "ag", authType: "oauth", category: "oauth", modelPrefixes: ["ag"] },
-  { id: "iflow", label: "iFlow AI", alias: "if", authType: "oauth", category: "oauth", modelPrefixes: ["if"] },
-  { id: "qwen", label: "Qwen Code", alias: "qw", authType: "oauth", category: "oauth", modelPrefixes: ["qw"] },
-  { id: "kiro", label: "Kiro AI", alias: "kr", authType: "oauth", category: "oauth", modelPrefixes: ["kr"] },
-  { id: "openrouter", label: "OpenRouter", authType: "apikey", category: "apikey", modelPrefixes: ["openrouter/"] },
-  { id: "openai", label: "OpenAI", authType: "apikey", category: "apikey", modelPrefixes: ["openai/"] },
-  { id: "gemini", label: "Gemini", authType: "apikey", category: "apikey", modelPrefixes: ["gemini/", "gc/"] },
-  { id: "deepseek", label: "DeepSeek", authType: "apikey", category: "apikey", modelPrefixes: ["deepseek/"] },
-  { id: "kimi", label: "Kimi Coding", authType: "apikey", category: "apikey", modelPrefixes: ["kimi/", "moonshot/"] },
-  { id: "glm", label: "GLM Coding", authType: "apikey", category: "apikey", modelPrefixes: ["glm/", "zhipu/"] },
-  { id: "minimax", label: "Minimax Coding", authType: "apikey", category: "apikey", modelPrefixes: ["minimax/"] },
-  { id: "anthropic", label: "Anthropic", authType: "apikey", category: "apikey", modelPrefixes: ["anthropic/"] }
+const FALLBACK_MODEL_API_PROVIDERS = [
+  {
+    provider: "openai",
+    label: "OpenAI",
+    protocol: "openai",
+    prefixes: ["openai/", "local/"],
+    enabled: false,
+    hasApiKey: false,
+    baseUrl: "https://api.openai.com/v1",
+    chatUrl: "https://api.openai.com/v1/chat/completions",
+    defaultModel: "gpt-5.5",
+    models: ["gpt-5.5", "gpt-5.2", "gpt-5-mini"],
+    sampleModels: ["gpt-5.5", "gpt-5.2", "gpt-5-mini"],
+    docsUrl: "https://platform.openai.com/docs/api-reference/chat/create"
+  },
+  {
+    provider: "claude",
+    label: "Claude",
+    protocol: "anthropic",
+    prefixes: ["claude/", "anthropic/"],
+    enabled: false,
+    hasApiKey: false,
+    baseUrl: "https://api.anthropic.com/v1",
+    chatUrl: "https://api.anthropic.com/v1/messages",
+    defaultModel: "claude-sonnet-4-5",
+    models: ["claude-sonnet-4-5", "claude-opus-4-1", "claude-haiku-4-5"],
+    sampleModels: ["claude-sonnet-4-5", "claude-opus-4-1", "claude-haiku-4-5"],
+    docsUrl: "https://docs.anthropic.com/en/api/messages"
+  },
+  {
+    provider: "gemini",
+    label: "Gemini",
+    protocol: "openai",
+    prefixes: ["gemini/", "gc/"],
+    enabled: false,
+    hasApiKey: false,
+    baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai",
+    chatUrl: "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+    defaultModel: "gemini-2.5-pro",
+    models: ["gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.5-flash-lite"],
+    sampleModels: ["gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.5-flash-lite"],
+    docsUrl: "https://ai.google.dev/gemini-api/docs/openai"
+  },
+  {
+    provider: "grok",
+    label: "Grok",
+    protocol: "openai",
+    prefixes: ["grok/", "xai/"],
+    enabled: false,
+    hasApiKey: false,
+    baseUrl: "https://api.x.ai/v1",
+    chatUrl: "https://api.x.ai/v1/chat/completions",
+    defaultModel: "grok-4",
+    models: ["grok-4", "grok-3", "grok-code-fast-1"],
+    sampleModels: ["grok-4", "grok-3", "grok-code-fast-1"],
+    docsUrl: "https://docs.x.ai/docs/api-reference"
+  },
+  {
+    provider: "deepseek",
+    label: "DeepSeek",
+    protocol: "openai",
+    prefixes: ["deepseek/"],
+    enabled: false,
+    hasApiKey: false,
+    baseUrl: "https://api.deepseek.com",
+    chatUrl: "https://api.deepseek.com/chat/completions",
+    defaultModel: "deepseek-v4-pro",
+    models: ["deepseek-v4-pro", "deepseek-v4-flash", "deepseek-chat", "deepseek-reasoner"],
+    sampleModels: ["deepseek-v4-pro", "deepseek-v4-flash", "deepseek-chat", "deepseek-reasoner"],
+    docsUrl: "https://api-docs.deepseek.com/api/create-chat-completion"
+  },
+  {
+    provider: "qwen",
+    label: "Qwen",
+    protocol: "openai",
+    prefixes: ["qwen/", "qw/"],
+    enabled: false,
+    hasApiKey: false,
+    baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    chatUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
+    defaultModel: "qwen-plus",
+    models: ["qwen-plus", "qwen-max", "qwen3-coder-plus"],
+    sampleModels: ["qwen-plus", "qwen-max", "qwen3-coder-plus"],
+    docsUrl: "https://help.aliyun.com/zh/model-studio/compatibility-of-openai-with-dashscope"
+  },
+  {
+    provider: "glm",
+    label: "GLM",
+    protocol: "openai",
+    prefixes: ["glm/", "zhipu/", "bigmodel/"],
+    enabled: false,
+    hasApiKey: false,
+    baseUrl: "https://open.bigmodel.cn/api/paas/v4",
+    chatUrl: "https://open.bigmodel.cn/api/paas/v4/chat/completions",
+    defaultModel: "glm-5.1",
+    models: ["glm-5.1", "glm-4.7", "glm-4.5"],
+    sampleModels: ["glm-5.1", "glm-4.7", "glm-4.5"],
+    docsUrl: "https://docs.bigmodel.cn/cn/guide/develop/openai/introduction"
+  },
+  {
+    provider: "kimi",
+    label: "Kimi",
+    protocol: "openai",
+    prefixes: ["kimi/", "moonshot/"],
+    enabled: false,
+    hasApiKey: false,
+    baseUrl: "https://api.moonshot.cn/v1",
+    chatUrl: "https://api.moonshot.cn/v1/chat/completions",
+    defaultModel: "kimi-k2.5",
+    models: ["kimi-k2.5", "kimi-k2-thinking", "moonshot-v1-128k"],
+    sampleModels: ["kimi-k2.5", "kimi-k2-thinking", "moonshot-v1-128k"],
+    docsUrl: "https://platform.moonshot.cn/docs/guide/kimi-k2-5-quickstart"
+  }
 ];
 
 const INTERNAL_ROUTE_TASK_IDS = new Set(["plan", "final"]);
@@ -220,6 +308,7 @@ function normalizeSectionTarget(section) {
   if (raw === "graph" || raw === "queue") return { section: "chat", taskTab: raw };
   if (raw === "tasks") return { section: "chat", taskTab: "queue" };
   if (raw === "control") return { section: "chat", taskTab: "" };
+  if (raw === "providers" || raw === "provider") return { section: "model-apis", taskTab: "" };
   return { section: raw || "chat", taskTab: "" };
 }
 
@@ -634,14 +723,41 @@ function isSupportedCommanderModel(model) {
   return id === "gpt5.5";
 }
 
+function isSupportedModelApiPoolModel(model) {
+  const id = normalizeCommanderModelId(model).toLowerCase();
+  const prefixes = [
+    "openai/",
+    "local/",
+    "claude/",
+    "anthropic/",
+    "gemini/",
+    "gc/",
+    "grok/",
+    "xai/",
+    "deepseek/",
+    "qwen/",
+    "qw/",
+    "glm/",
+    "zhipu/",
+    "bigmodel/",
+    "kimi/",
+    "moonshot/"
+  ];
+  return prefixes.some((prefix) => id.startsWith(prefix));
+}
+
 function cleanPoolsForTier(pools) {
   const next = { ...pools };
   next.commander = EXPLICIT_COMMANDER_MODELS.length
     ? EXPLICIT_COMMANDER_MODELS.slice()
     : uniqueModelIds(next.commander).filter(isSupportedCommanderModel);
   if (!next.commander.length) next.commander = DEFAULT_MODEL_POOLS.commander.slice();
-  next.coding = uniqueModelIds(next.coding).filter((model) => !isCommanderGradeModel(model));
-  if (!next.coding.length) next.coding = DEFAULT_MODEL_POOLS.coding.slice();
+  for (const pool of ["strong", "coding", "free"]) {
+    next[pool] = uniqueModelIds(next[pool]).filter(
+      (model) => isSupportedModelApiPoolModel(model) && !isCommanderGradeModel(model)
+    );
+    if (!next[pool].length) next[pool] = DEFAULT_MODEL_POOLS[pool].slice();
+  }
   return next;
 }
 
@@ -810,7 +926,10 @@ function hasLegacyPromptSettings(source = {}) {
   return (
     /\b(you are|return compact|worker model|commander|goal-driven|synthesize|assigned subtask|codex cli)\b/i.test(
       text
-    ) || /目标驱动 Agent 路由|只返回紧凑 JSON|优先返回紧凑 JSON|不要假装|evidence"\s*:\s*\[\]/i.test(text)
+    ) ||
+    /目标驱动 Agent 路由|只返回紧凑 JSON|优先返回紧凑 JSON|不要假装|evidence"\s*:\s*\[\]|只返回 AgentRoute Structured Output Schema|所有模型阶段必须遵守 AgentRoute Structured Output Schema|最终汇总也必须返回 AgentRoute Structured Output Schema|返回任务图 JSON schema/i.test(
+      text
+    )
   );
 }
 
@@ -908,7 +1027,7 @@ function promptPreviewSections(settings) {
         prompts.commanderSystem,
         prompts.reviewSystem,
         "[runtime] Active strategy, memory, worker results, verification state, risk state, and budget state are appended at runtime.",
-        "[runtime] Review must return compact JSON with status, progress_summary, final_answer, next_tasks, and memory_candidates."
+        "[runtime] Review must call the required function with compact arguments containing status, progress_summary, final_answer, next_tasks, and memory_candidates."
       ]
     },
     {
@@ -1027,36 +1146,8 @@ function isWaiting(status) {
   ].includes(String(status || ""));
 }
 
-function isRunnableTaskStatus(status) {
-  return ["waiting", "queued", "pending", "retry_ready"].includes(String(status || ""));
-}
-
 function isQueuedTaskStatus(status) {
   return ["waiting", "queued", "pending", "retry_ready"].includes(String(status || "").toLowerCase());
-}
-
-function taskDerivedGoalStatus(goal, tasks = []) {
-  const current = String(goal?.status || "").toLowerCase();
-  const visibleTasks = array(tasks).filter(isUserVisibleTask);
-  if (!visibleTasks.length) {
-    if (["failed", "error"].includes(current)) return "failed";
-    if (["blocked", "waiting_human", "awaiting_confirmation", "running"].includes(current)) return current;
-    return current || "queued";
-  }
-  if (visibleTasks.some((task) => task.status === "running")) return "running";
-  if (visibleTasks.some((task) => canApproveTask(task))) return "waiting_human";
-  if (visibleTasks.some((task) => task.status === "blocked")) return "blocked";
-  if (visibleTasks.every((task) => task.status === "canceled")) return "stopped";
-  if (visibleTasks.every((task) => isDone(task.status))) return "completed";
-  if (
-    ["blocked", "waiting_human", "awaiting_confirmation"].includes(current) &&
-    visibleTasks.some((task) => isRunnableTaskStatus(task.status))
-  )
-    return "queued";
-  if (visibleTasks.some((task) => isRunnableTaskStatus(task.status)))
-    return current === "running" ? "running" : "queued";
-  if (visibleTasks.every((task) => isDone(task.status) || isFailed(task.status))) return "failed";
-  return current || "queued";
 }
 
 function riskLabel(level) {
@@ -1225,9 +1316,22 @@ function taskExecutionGroup(task = {}, node = {}) {
     .join("\n");
   if (isRouteInternalTask(task) || isRouteInternalTask(node.task || node)) return "agent";
   if (type === "human_approval" || toolWorker === "human") return "human";
-  if (["web", "document", "documents", "browser"].includes(toolWorker)) return "tool";
-  if (model === "web-tool" || model === "document-tool" || model === "browser-tool") return "tool";
-  if (["web_search", "api_read", "document_generate", "browser", "browser_read", "page_read"].includes(type))
+  if (["web", "files", "file", "document", "documents", "browser"].includes(toolWorker)) return "tool";
+  if (model === "web-tool" || model === "files-tool" || model === "document-tool" || model === "browser-tool")
+    return "tool";
+  if (
+    [
+      "web_search",
+      "api_read",
+      "local_read",
+      "file_read",
+      "filesystem_read",
+      "document_generate",
+      "browser",
+      "browser_read",
+      "page_read"
+    ].includes(type)
+  )
     return "tool";
   if (
     ["web_read", "web_fetch", "http_fetch", "public_web_read", "public_api_read"].includes(type) &&
@@ -1267,6 +1371,7 @@ function taskWorkerLabel(task = {}) {
   if (group === "tool") {
     const toolWorker = String(task.toolWorker || task.tool_worker || "").toLowerCase();
     if (toolWorker === "web") return "web 工具";
+    if (toolWorker === "files" || toolWorker === "file") return "文件工具";
     if (toolWorker === "document" || toolWorker === "documents") return "文档工具";
     if (toolWorker === "browser") return "浏览器工具";
     if (String(task.modelPool || "").toLowerCase() === "codex-cli") return "Codex CLI";
@@ -1299,14 +1404,14 @@ function commonFailureTextLabel(value) {
   if (/Codex CLI chat proxy exited with code\s+\d+/i.test(text)) {
     const code = text.match(/Codex CLI chat proxy exited with code\s+(\d+)/i)?.[1] || "";
     if (/usage limit|purchase more credits|requires more credits|insufficient credits|credit/i.test(text)) {
-      return "Codex CLI 账号额度已用尽或供应商额度不足，当前模型无法继续。";
+      return "Codex CLI 账号额度已用尽或模型 API 额度不足，当前模型无法继续。";
     }
     return `Codex CLI 模型代理调用失败${code ? `（退出代码 ${code}）` : ""}，原始日志包含本地 CLI 警告；需要检查 Codex CLI 账号额度或本地 CLI 状态。`;
   }
   if (
     /This request requires more credits|Prompt tokens limit exceeded|can only afford|purchase more credits/i.test(text)
   ) {
-    return "供应商额度不足，当前模型请求无法继续。";
+    return "模型 API 额度不足，当前模型请求无法继续。";
   }
   if (/You've hit your usage limit|usage limit|upgrade to pro/i.test(text)) {
     return "模型账号已达到使用额度限制，当前请求无法继续。";
@@ -1333,8 +1438,8 @@ function commonFailureTextLabel(value) {
     .replace(/^Commander could not create a plan:\s*/i, "总指挥无法创建执行计划：")
     .replace(/^Codex CLI chat proxy exited with code\s+(\d+)\./i, "Codex CLI 模型代理退出（代码 $1）。")
     .replace(/You've hit your usage limit[^。]*$/i, "Codex CLI 账号额度已用尽或达到使用上限。")
-    .replace(/This request requires more credits[^。]*$/i, "供应商额度不足，当前请求无法继续。")
-    .replace(/Prompt tokens limit exceeded[^。]*$/i, "供应商当前额度不足以承载本次提示词。")
+    .replace(/This request requires more credits[^。]*$/i, "模型 API 额度不足，当前请求无法继续。")
+    .replace(/Prompt tokens limit exceeded[^。]*$/i, "模型 API 当前额度不足以承载本次提示词。")
     .replace(/Diagnostics:\s*/gi, "诊断：")
     .replace(/parseError=multiple_different_json_documents/gi, "解析错误=模型输出了多个不同 JSON 对象")
     .replace(/parseError=multiple_repeated_json_documents/gi, "解析错误=模型重复输出了多个 JSON 对象")
@@ -1367,9 +1472,9 @@ function commonFailureTextLabel(value) {
     .replace(/^User location is not supported for the API use\.?$/i, "当前地区不支持调用这个模型 API。")
     .replace(
       /credits exhausted|credit balance is too low|insufficient credits|requires more credits/i,
-      "模型或供应商额度已耗尽"
+      "模型 API 额度已耗尽"
     )
-    .replace(/quota exceeded|insufficient_quota|rate limit exceeded/i, "模型或供应商额度/频率限制已触发")
+    .replace(/quota exceeded|insufficient_quota|rate limit exceeded/i, "模型 API 额度/频率限制已触发")
     .replace(
       /^HTTP\s+(\d+)(.*)$/i,
       (_, status, rest) => `上游服务返回 HTTP ${status}${rest ? `：${rest.trim()}` : "。"}`
@@ -1379,7 +1484,7 @@ function commonFailureTextLabel(value) {
     .replace(/^(.+?) did not provide usable output\.?$/i, (_, source) => `${source} 没有提供可用内容。`)
     .replace(/^No usable output from\s+(.+?)\.?$/i, (_, source) => `${source} 没有返回可用内容。`)
     .replace(/^Model call failed\.?$/i, "模型调用失败。")
-    .replace(/^Provider request failed\.?$/i, "供应商请求失败。")
+    .replace(/^Provider request failed\.?$/i, "模型 API 请求失败。")
     .replace(/^Upstream request failed\.?$/i, "上游请求失败。");
   return valueLabel(translated) || translated;
 }
@@ -1752,6 +1857,7 @@ const AI_SDK_AGENT_EVENT_BY_PART = {
   "data-agent-run": "start",
   "data-agent-plan": "plan",
   "data-agent-graph": "graph",
+  "data-agent-checkpoint": "checkpoint",
   "data-agent-strategy": "strategy",
   "data-agent-budget": "budget",
   "data-agent-risk": "risk",
@@ -1816,102 +1922,6 @@ async function consumeAgentRouteUiMessageStream(payload, { signal, onEvent }) {
   }
 }
 
-function localGraph(goal) {
-  const tasks = array(goal?.tasks).filter(isGraphVisibleTask);
-  const taskMap = new Map(tasks.map((task) => [task.id, task]));
-  const availableArtifacts = new Map();
-  for (const task of tasks) {
-    if (!isDone(task.status)) continue;
-    const verification = String(task.verificationStatus || "").toLowerCase();
-    if (verification && verification !== "verified" && verification !== "partially_verified") continue;
-    for (const ref of array(task.produces)) {
-      const id = artifactId(ref);
-      if (id) availableArtifacts.set(id, { id, taskId: task.id });
-    }
-  }
-  const depthMemo = new Map();
-  const depthFor = (taskId, seen = new Set()) => {
-    if (depthMemo.has(taskId)) return depthMemo.get(taskId);
-    if (seen.has(taskId)) return 0;
-    const task = taskMap.get(taskId);
-    if (!task) return 0;
-    const deps = array(task.dependsOn).filter((id) => taskMap.has(id));
-    const depth = deps.length ? 1 + Math.max(...deps.map((id) => depthFor(id, new Set([...seen, taskId])))) : 0;
-    depthMemo.set(taskId, depth);
-    return depth;
-  };
-  const nodes = tasks.map((task) => {
-    const blockedBy = array(task.blockedBy);
-    const waitingFor = [];
-    const reasons = array(task.dependencyReasons);
-    for (const depId of array(task.dependsOn)) {
-      const dep = taskMap.get(depId);
-      if (!dep) {
-        blockedBy.push(depId);
-        reasons.push(`缺少依赖：${depId}`);
-      } else if (isFailed(dep.status)) {
-        blockedBy.push(depId);
-        reasons.push(`依赖 ${depId} 状态为 ${STATUS_LABEL[dep.status] || valueLabel(dep.status) || dep.status}`);
-      } else if (!isDone(dep.status)) {
-        waitingFor.push(depId);
-        reasons.push(`依赖 ${depId} 尚未完成`);
-      }
-    }
-    const missingArtifacts = array(task.missingArtifacts).length
-      ? array(task.missingArtifacts)
-      : array(task.consumes)
-          .map(artifactId)
-          .filter((id) => id && !availableArtifacts.has(id));
-    if (missingArtifacts.length) reasons.push(`缺少产物：${missingArtifacts.join(", ")}`);
-    const waitingStatus = ["waiting", "queued", "pending", "retry_ready"].includes(task.status);
-    const readiness =
-      task.dependencyStatus ||
-      (blockedBy.length || isFailed(task.status)
-        ? "blocked"
-        : !waitingStatus
-          ? "not_waiting"
-          : waitingFor.length || missingArtifacts.length
-            ? "waiting"
-            : "ready");
-    return {
-      id: task.id,
-      title: task.title,
-      status: task.status,
-      priority: task.priority,
-      dependencies: array(task.dependsOn),
-      consumes: array(task.consumes),
-      produces: array(task.produces),
-      depth: depthFor(task.id),
-      readiness: {
-        ready: readiness === "ready",
-        status: readiness,
-        reasons,
-        blockedBy: [...new Set(blockedBy)],
-        waitingFor: [...new Set(waitingFor)],
-        missingArtifacts
-      }
-    };
-  });
-  const readyTaskIds = nodes.filter((node) => node.readiness.ready).map((node) => node.id);
-  const parallelMap = new Map();
-  for (const node of nodes.filter((item) => item.readiness.ready)) {
-    const key = String(node.depth || 0);
-    if (!parallelMap.has(key)) parallelMap.set(key, []);
-    parallelMap.get(key).push(node.id);
-  }
-  return {
-    valid: true,
-    nodes,
-    edges: nodes.flatMap((node) => node.dependencies.map((dep) => ({ from: dep, to: node.id, type: "depends_on" }))),
-    artifacts: [...availableArtifacts.values()],
-    readyTaskIds,
-    parallelGroups: [...parallelMap.entries()].map(([depth, taskIds]) => ({ depth: Number(depth), taskIds })),
-    blockedChains: nodes
-      .filter((node) => node.readiness.status === "blocked")
-      .map((node) => ({ taskId: node.id, blockedBy: node.readiness.blockedBy, reasons: node.readiness.reasons }))
-  };
-}
-
 function filterGraphSnapshotForTasks(graph, tasks = []) {
   if (!graph?.nodes) return null;
   const allowedTaskIds = new Set(
@@ -1944,26 +1954,19 @@ function filterGraphSnapshotForTasks(graph, tasks = []) {
 }
 
 function graphForGoal(goal) {
-  const local = localGraph(goal);
   const snapshot = filterGraphSnapshotForTasks(goal?.graph, goal?.tasks);
-  if (!snapshot) return local;
-  const remoteById = new Map(array(snapshot.nodes).map((node) => [String(node.id || ""), node]));
-  const nodes = local.nodes.map((node) => {
-    const remote = remoteById.get(String(node.id || "")) || {};
-    return {
-      ...remote,
-      ...node,
-      readiness: node.readiness || remote.readiness || {}
-    };
-  });
-  return {
-    ...snapshot,
-    ...local,
-    valid: typeof snapshot.valid === "boolean" ? snapshot.valid : local.valid,
-    cycles: array(snapshot.cycles),
-    unknownDependencies: array(snapshot.unknownDependencies),
-    nodes
-  };
+  return (
+    snapshot || {
+      valid: true,
+      nodes: [],
+      edges: [],
+      artifacts: [],
+      readyTaskIds: [],
+      readyTasks: [],
+      parallelGroups: [],
+      blockedChains: []
+    }
+  );
 }
 
 function eventSeverity(type, data = {}) {
@@ -2303,66 +2306,13 @@ function localVerificationHealth(tasks = []) {
   };
 }
 
-function localDiagnostics(goal, graph) {
-  const tasks = array(goal?.tasks);
-  const rootCauses = [];
-  const needsEvidence = tasks.filter((task) => task.status === "needs_evidence");
-  const verificationFailed = tasks.filter(
-    (task) => task.verificationStatus === "unverified" && task.status !== "needs_evidence"
-  );
-  const budgetBlocked = tasks.filter(
-    (task) => task.budgetBlockedReason || task.budgetStatus === "blocked" || task.budgetStatus === "exhausted"
-  );
-  const riskBlocked = tasks.filter((task) => task.blockedReason || task.requiresHumanApproval);
-  if (verificationFailed.length)
-    rootCauses.push({
-      code: "verification_failed",
-      message: `${verificationFailed.length} 个任务验证失败`,
-      taskIds: verificationFailed.map((task) => task.id)
-    });
-  if (needsEvidence.length)
-    rootCauses.push({
-      code: "needs_evidence",
-      message: `${needsEvidence.length} 个任务证据不足，等待 agent 补充取证`,
-      taskIds: needsEvidence.map((task) => task.id)
-    });
-  if (budgetBlocked.length)
-    rootCauses.push({
-      code: "budget_exceeded",
-      message: `${budgetBlocked.length} 个任务被预算阻断`,
-      taskIds: budgetBlocked.map((task) => task.id)
-    });
-  if (riskBlocked.length)
-    rootCauses.push({
-      code: "risk_blocked",
-      message: `${riskBlocked.length} 个任务处于风险/人工确认状态`,
-      taskIds: riskBlocked.map((task) => task.id)
-    });
-  if (array(graph?.blockedChains).length)
-    rootCauses.push({ code: "dependency_blocked", message: `${array(graph.blockedChains).length} 条依赖链阻塞` });
-  return {
-    rootCauses,
-    summary: rootCauses.length ? `发现 ${rootCauses.length} 类可观测阻塞` : "未发现明显故障",
-    suggestedNextAction:
-      rootCauses[0]?.code === "verification_failed"
-        ? "检查证据，再改变方法后重试"
-        : rootCauses[0]?.code === "risk_blocked"
-          ? "等待人工确认或修改任务规避风险"
-          : rootCauses[0]?.code === "dependency_blocked"
-            ? "优先修复上游依赖任务"
-            : "继续观察可执行任务"
-  };
-}
-
-function buildClientMonitor(goal, graph, observability) {
+function buildClientMonitor(goal, observability) {
   const tasks = array(goal?.tasks).filter(isUserVisibleTask);
-  const derivedStatus = goal ? taskDerivedGoalStatus(goal, tasks) : "";
+  const checkpointStatus = String(goal?.status || "").toLowerCase();
   const hasVisibleGoal = Boolean(
     goal &&
     (tasks.length ||
-      ["queued", "pending", "waiting", "completed", "done", "failed", "blocked"].includes(
-        String(derivedStatus || "").toLowerCase()
-      ))
+      ["queued", "pending", "waiting", "running", "completed", "done", "failed", "blocked"].includes(checkpointStatus))
   );
   if (!goal || !hasVisibleGoal) {
     const monitorReset = Boolean(observability?.monitorReset);
@@ -2402,7 +2352,7 @@ function buildClientMonitor(goal, graph, observability) {
     array(observability?.diagnostics).find((item) => item.goalId === goal?.id || item.goalId === goal?.goalId) || null;
   const verificationHealth = monitorReset
     ? localVerificationHealth([])
-    : backendGoal?.verificationHealth || observability?.verificationMonitor || localVerificationHealth(tasks);
+    : backendGoal?.verificationHealth || observability?.verificationMonitor || localVerificationHealth([]);
   const budget = monitorReset ? {} : backendGoal?.budget || observability?.budgetMonitor || {};
   const usage = budget.usage || {};
   const events = monitorReset
@@ -2418,17 +2368,17 @@ function buildClientMonitor(goal, graph, observability) {
         .slice(0, 80);
   const diagnostics = monitorReset
     ? { rootCauses: [], summary: "监控已重置，等待新的运行事件", suggestedNextAction: "继续观察新的任务事件" }
-    : backendDiagnostics || localDiagnostics(goal, graph);
+    : backendDiagnostics || {
+        rootCauses: [],
+        summary: "等待后端诊断事件",
+        suggestedNextAction: "继续观察 LangGraph checkpoint 和 observability 事件"
+      };
   const workerHealth = monitorReset ? [] : array(observability?.workerHealth);
   return {
-    status: backendGoal?.status || derivedStatus || goal?.status || "idle",
-    phase:
-      backendGoal?.currentPhase || Object.entries(goal?.flow || {}).find(([, value]) => value === "active")?.[0] || "",
+    status: backendGoal?.status || checkpointStatus || "idle",
+    phase: backendGoal?.currentPhase || goal?.phase || "",
     progress: backendGoal?.progress ?? 0,
-    riskLevel:
-      backendGoal?.riskLevel ||
-      tasks.find((task) => ["critical", "high"].includes(String(task.riskLevel).toLowerCase()))?.riskLevel ||
-      "low",
+    riskLevel: backendGoal?.riskLevel || goal?.riskLevel || "low",
     verificationHealth,
     budget: {
       usage,
@@ -2438,11 +2388,8 @@ function buildClientMonitor(goal, graph, observability) {
       warnings: array(budget.warnings),
       topTasks: array(budget.topTasks)
     },
-    blockedTasks:
-      backendGoal?.blockedTasks ??
-      tasks.filter((task) => ["blocked", "waiting_human", "awaiting_confirmation"].includes(task.status)).length,
-    retryCount:
-      backendGoal?.retryCount ?? tasks.reduce((sum, task) => sum + Math.max(0, Number(task.attempts || 0) - 1), 0),
+    blockedTasks: backendGoal?.blockedTasks ?? 0,
+    retryCount: backendGoal?.retryCount ?? 0,
     runtimeMs: backendGoal?.runtimeMs || 0,
     events,
     diagnostics,
@@ -2534,8 +2481,9 @@ export default function AgentRouteStudio() {
   const [selectedQueueTaskId, setSelectedQueueTaskId] = useState("");
   const [graphViewMode, setGraphViewMode] = useState("graph");
   const [taskPanelTab, setTaskPanelTab] = useState("queue");
-  const [selectedProviderId, setSelectedProviderId] = useState("");
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [chatFocusRequest, setChatFocusRequest] = useState(0);
+  const [chatResetSignal, setChatResetSignal] = useState(0);
   const abortRef = useRef(null);
 
   useEffect(() => {
@@ -2574,8 +2522,8 @@ export default function AgentRouteStudio() {
     setSelectedGraphTaskId("");
   }, [activeGoal?.id]);
   const monitor = useMemo(
-    () => buildClientMonitor(activeGoal, graph, state.observability),
-    [activeGoal, graph, state.observability]
+    () => buildClientMonitor(activeGoal, state.observability),
+    [activeGoal, state.observability]
   );
 
   useEffect(() => {
@@ -2681,10 +2629,6 @@ export default function AgentRouteStudio() {
     }));
   }
 
-  function setFlow(goal, key, status) {
-    return { ...goal, flow: { ...(goal.flow || {}), [key]: status } };
-  }
-
   function upsertTask(goal, data, status) {
     const raw = data.task || {};
     const id = raw.id || data.model || uid("task");
@@ -2746,123 +2690,50 @@ export default function AgentRouteStudio() {
     const tasks = array(goal.tasks).filter((task) => task.id !== taskId);
     return {
       ...goal,
-      status: taskDerivedGoalStatus(goal, tasks),
       tasks,
       graph: filterGraphSnapshotForTasks(incomingGraph || goal.graph, tasks)
     };
+  }
+
+  function goalFromCheckpointPayload(existingGoal, payload = {}) {
+    const checkpointGoal = payload.goal && typeof payload.goal === "object" ? payload.goal : {};
+    const id = existingGoal?.id || checkpointGoal.goalId || checkpointGoal.goal_id || payload.goal_id || payload.goalId;
+    return normalizeGoalForState({
+      ...(existingGoal || {}),
+      ...checkpointGoal,
+      id,
+      goalId: checkpointGoal.goalId || checkpointGoal.goal_id || payload.goal_id || payload.goalId || id,
+      goal: existingGoal?.goal || checkpointGoal.goal || "",
+      title: existingGoal?.title || checkpointGoal.title || shortText(existingGoal?.goal || checkpointGoal.goal || id, 76),
+      commander: existingGoal?.commander || checkpointGoal.commander || "",
+      priority: existingGoal?.priority || checkpointGoal.priority || "",
+      output: checkpointGoal.output || existingGoal?.output || "",
+      tasks: array(payload.tasks).length ? payload.tasks : checkpointGoal.tasks,
+      strategy: checkpointGoal.strategyState || checkpointGoal.strategy_state || existingGoal?.strategy || null,
+      strategyHistory: checkpointGoal.strategyHistory || checkpointGoal.strategy_history || existingGoal?.strategyHistory,
+      graph: payload.graph || checkpointGoal.graph || existingGoal?.graph || null,
+      updatedAt: checkpointGoal.updatedAt || checkpointGoal.updated_at || payload.at || nowTime()
+    });
   }
 
   function handleStreamEvent(goalId, type, data) {
     if (String(type || "").toLowerCase() === "langgraph") return;
     const monitorEvent = makeMonitorEvent(goalId, type, data);
     setState((current) => {
-      let nextCalls = current.calls;
-      const goals = current.goals.map((goal) => {
-        if (goal.id !== goalId) return goal;
-        let next = { ...goal, updatedAt: nowTime() };
-        if (type === "start") {
-          next = setFlow(
-            { ...next, status: "running", strategy: data.strategy || next.strategy || null },
-            "commander",
-            "active"
-          );
-          if (next.strategy) next = setFlow(next, "strategy", "done");
-        } else if (type === "plan") {
-          const known = new Map(array(next.tasks).map((task) => [task.id, task]));
-          const internalTasks = array(next.tasks).filter(isRouteInternalTask);
-          const plannedTasks = array(data.tasks)
-            .filter((task) => isDisplayTask(task) && !isRouteInternalTask(task))
-            .map((task, index) =>
-              normalizeTask({ ...(known.get(task.id) || {}), ...task }, internalTasks.length + index)
-            );
-          next = {
-            ...next,
-            tasks: [...internalTasks, ...plannedTasks]
-          };
-          next = setFlow(setFlow(setFlow(next, "commander", "done"), "plan", "done"), "graph", "active");
-        } else if (type === "worker_start") {
-          nextCalls += 1;
-          next = upsertTask(next, data, "running");
-          next = setFlow(setFlow(next, "route", "done"), "worker", "active");
-        } else if (type === "worker_log") {
-          next = upsertTask(next, data, "running");
-        } else if (type === "worker_done") {
-          const status = data.status || (data.ok === false ? "failed" : "completed");
-          next = upsertTask(next, data, status);
-          next = setFlow(next, "worker", isDone(status) ? "done" : "active");
-        } else if (
-          type === "risk" ||
-          type === "verification" ||
-          type === "budget" ||
-          String(type).toLowerCase().startsWith("authenticity") ||
-          String(type).toLowerCase() === "correctiveactionsuggested" ||
-          String(type).toLowerCase() === "actionranked" ||
-          String(type).toLowerCase() === "actionlearningupdated" ||
-          String(type).toLowerCase() === "decisionattributed"
-        ) {
-          if (data.task) next = upsertTask(next, data, data.task.status || "running");
-        } else if (type === "strategy") {
-          next = { ...next, strategy: data.strategy || next.strategy || null, strategyHistory: array(data.history) };
-          next = setFlow(next, "strategy", data.violations?.length ? "active" : "done");
-        } else if (type === "graph") {
-          next = syncGraph(next, data.graph || next.graph);
-          next = setFlow(next, "graph", data.graph?.valid === false ? "failed" : "done");
-        } else if (type === "pause") {
-          next = { ...next, status: data.status || "awaiting_confirmation", output: data.message || next.output || "" };
-          if (data.task) next = upsertTask(next, data, next.status);
-        } else if (type === "final") {
-          const content = String(data.content || "");
-          const finalStatus = String(data.status || data.finalStatus || data.final_status || "").toLowerCase();
-          const failedFinal = isFailedStreamStatus(data);
-          const withOutput = {
-            ...next,
-            output: content,
-            status: failedFinal ? finalStatus : content ? "completed" : "failed",
-            finalModel: data.source_model || data.commander_model || next.commander
-          };
-          next = setFlow(
-            {
-              ...withOutput,
-              status: failedFinal
-                ? finalStatus
-                : content
-                  ? taskDerivedGoalStatus(withOutput, withOutput.tasks)
-                  : "failed"
-            },
-            "done",
-            failedFinal || !content ? "failed" : "done"
-          );
-        } else if (type === "error") {
-          next = { ...next, output: data.message || "AgentRoute 执行失败", status: "failed" };
-        } else if (type === "done" && next.status === "running") {
-          const finalStatus = data.status || data.finalStatus || data.final_status || "";
-          const finalMessage = data.failureReason || data.failure_reason || data.message || "";
-          next = {
-            ...next,
-            output: finalMessage || next.output,
-            status: finalStatus || (next.output || finalMessage ? "completed" : "failed")
-          };
-        } else if (type === "done") {
-          const finalStatus = data.status || data.finalStatus || data.final_status || "";
-          const finalMessage = data.failureReason || data.failure_reason || data.message || "";
-          if (finalMessage || ["blocked", "failed", "waiting_human"].includes(String(finalStatus).toLowerCase())) {
-            next = {
-              ...next,
-              output: next.output || finalMessage,
-              status:
-                ["blocked", "failed", "waiting_human"].includes(String(finalStatus).toLowerCase()) &&
-                !isDone(next.status)
-                  ? finalStatus
-                  : next.status
-            };
-          }
-        }
-        return next;
-      });
+      const isCheckpoint = String(type || "").toLowerCase() === "checkpoint";
+      let replaced = false;
+      const goals = isCheckpoint
+        ? current.goals.map((goal) => {
+            if (goal.id !== goalId && goal.goalId !== goalId) return goal;
+            replaced = true;
+            return goalFromCheckpointPayload(goal, data);
+          })
+        : current.goals;
+      if (isCheckpoint && !replaced) goals.push(goalFromCheckpointPayload(null, data));
       return {
         ...current,
         goals,
-        calls: nextCalls,
+        calls: type === "worker_start" ? current.calls + 1 : current.calls,
         observability: updateLocalObservability(current.observability, monitorEvent)
       };
     });
@@ -2883,6 +2754,7 @@ export default function AgentRouteStudio() {
     const task = data.task || {};
     const rawType = String(type || "").toLowerCase();
     if (isModelEventType(rawType)) return modelProgressMessage(rawType, data);
+    if (type === "checkpoint") return "状态快照已同步";
     if (type === "start") return `总指挥启动：${data.commander_model || "自动路由"}`;
     if (type === "plan") return `任务图生成：${array(data.tasks).length} 个节点`;
     if (type === "worker_start") return `执行器启动：${displayTask(task.title || data.model || "任务")}`;
@@ -2964,9 +2836,6 @@ export default function AgentRouteStudio() {
       }
     } finally {
       abortRef.current = null;
-      patchGoal(goal.id, (item) =>
-        item.status === "running" ? { ...item, status: item.output ? "completed" : "failed" } : item
-      );
     }
   }
 
@@ -3009,30 +2878,7 @@ export default function AgentRouteStudio() {
       ...goal,
       status: "stopped",
       updatedAt: nowTime(),
-      flow: { ...(goal.flow || {}), done: "failed" },
-      tasks: array(goal.tasks).map((task) => {
-        const status = String(task.status || "").toLowerCase();
-        if (
-          isDone(status) ||
-          [
-            "failed",
-            "blocked",
-            "canceled",
-            "cancelled",
-            "needs_evidence",
-            "waiting_human",
-            "awaiting_confirmation"
-          ].includes(status)
-        ) {
-          return task;
-        }
-        return {
-          ...task,
-          status: "canceled",
-          blockedReason: task.blockedReason || "用户停止了本次执行流",
-          updatedAt: nowTime()
-        };
-      })
+      flow: { ...(goal.flow || {}), done: "failed" }
     }));
     addLog("聊天目标已停止", "warn");
   }
@@ -3065,9 +2911,7 @@ export default function AgentRouteStudio() {
     }
     patchGoal(activeGoal.id, (goal) => {
       const next = data.task ? upsertTask(goal, data, data.task.status) : goal;
-      return action === "cancel_task" || action === "reject_task"
-        ? { ...next, status: taskDerivedGoalStatus(next, next.tasks) }
-        : next;
+      return data.goal && typeof data.goal === "object" ? normalizeGoalForState({ ...next, ...data.goal }) : next;
     });
     addLog(
       data.skipped
@@ -3149,7 +2993,7 @@ export default function AgentRouteStudio() {
         });
         return {
           ...goal,
-          status: goalRecovery?.to || taskDerivedGoalStatus(goal, tasks),
+          status: goalRecovery?.to || goal.status,
           blockedReason: goalRecovery?.blockedReason || goal.blockedReason || "",
           recoverySummary: {
             at: summary.at,
@@ -3271,6 +3115,51 @@ export default function AgentRouteStudio() {
     }
   }
 
+  async function resetAllHistory() {
+    if (
+      typeof window !== "undefined" &&
+      !window.confirm("确定要重置所有聊天记录和任务记录吗？模型 API 设置不会被删除。")
+    ) {
+      return;
+    }
+    if (abortRef.current) {
+      try {
+        abortRef.current.abort();
+      } catch {}
+      abortRef.current = null;
+    }
+    setSelectedGraphTaskId("");
+    setSelectedQueueTaskId("");
+    setTaskPanelTab("queue");
+    setChatResetSignal((current) => current + 1);
+    setState(initialState());
+    if (typeof window !== "undefined") {
+      try {
+        window.localStorage.removeItem(STORAGE_KEY);
+        window.localStorage.removeItem(FALLBACK_STORAGE_KEY);
+      } catch {}
+    }
+    try {
+      const response = await fetch("/api/agent-route/run", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "reset_agent_route", scope: "all" })
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(data.error?.message || data.message || `记录重置失败（${response.status}）`);
+      }
+    } catch (err) {
+      const message = `记录重置失败：${err.message || String(err)}`;
+      console.error(message);
+      if (typeof window !== "undefined") window.alert(message);
+      setState((current) => ({
+        ...current,
+        logs: [...array(current.logs), { id: uid("log"), time: nowTime(), level: "error", message }].slice(-180)
+      }));
+    }
+  }
+
   async function loadMemories() {
     const response = await fetch("/api/agent-route/run", {
       method: "POST",
@@ -3317,8 +3206,8 @@ export default function AgentRouteStudio() {
     setSidebarOpen(false);
   }
 
-  function openProviderSettings() {
-    switchSection("providers");
+  function openModelApiSettings() {
+    switchSection("model-apis");
   }
 
   function switchSection(section, options = {}) {
@@ -3339,6 +3228,7 @@ export default function AgentRouteStudio() {
 
   function focusChatComposer() {
     switchSection("chat");
+    setChatFocusRequest((current) => current + 1);
     if (typeof document === "undefined") return;
     setTimeout(() => {
       document.getElementById("agentChatInput")?.focus();
@@ -3501,11 +3391,14 @@ export default function AgentRouteStudio() {
             <button type="button" data-open-settings="models" onClick={() => openSettings("models")}>
               <span className="material-symbols-outlined">tune</span>模型路由
             </button>
-            <button type="button" data-open-providers onClick={openProviderSettings}>
-              <span className="material-symbols-outlined">key</span>供应商设置
+            <button type="button" data-open-model-apis onClick={openModelApiSettings}>
+              <span className="material-symbols-outlined">key</span>模型 API
             </button>
             <button type="button" data-open-settings="budget" onClick={() => openSettings("budget")}>
               <span className="material-symbols-outlined">speed</span>预算设置
+            </button>
+            <button type="button" className="danger" data-reset-agent-route onClick={resetAllHistory}>
+              <span className="material-symbols-outlined">restart_alt</span>重置记录
             </button>
           </div>
         </section>
@@ -3572,6 +3465,9 @@ export default function AgentRouteStudio() {
                   promptSettings={promptSettings}
                   budgetSettings={budgetSettings}
                   historyGoals={state.goals}
+                  focusRequest={chatFocusRequest}
+                  resetSignal={chatResetSignal}
+                  onResetAll={resetAllHistory}
                   onRoundStart={registerChatGoal}
                   onRoundStop={markChatGoalStopped}
                   onAgentEvent={(goalId, type, data) => handleStreamEvent(goalId, type, data)}
@@ -3600,30 +3496,8 @@ export default function AgentRouteStudio() {
               />
             </div>
 
-            <div className="app-section" data-agent-section="providers" hidden={activeSection !== "providers"}>
-              <section className="panel provider-workbench" id="providers">
-                <div className="panel-head">
-                  <div>
-                    <h2>供应商设置</h2>
-                    <p>这里内嵌原供应商管理页面，Agent 内部模型调用会使用这些连接和自定义 Provider 节点。</p>
-                  </div>
-                  <a className="link-btn" href="/dashboard/providers" target="_blank" rel="noreferrer">
-                    新窗口打开
-                  </a>
-                </div>
-                <div className="provider-frame-wrap">
-                  {activeSection === "providers" && selectedProviderId ? (
-                    <ProviderDetailPage
-                      embedded
-                      providerId={selectedProviderId}
-                      onBack={() => setSelectedProviderId("")}
-                    />
-                  ) : null}
-                  {activeSection === "providers" && !selectedProviderId ? (
-                    <ProvidersDashboard embedded onOpenProvider={setSelectedProviderId} />
-                  ) : null}
-                </div>
-              </section>
+            <div className="app-section" data-agent-section="model-apis" hidden={activeSection !== "model-apis"}>
+              {activeSection === "model-apis" ? <ModelApiSettingsPanel addLog={addLog} /> : null}
             </div>
           </section>
 
@@ -4149,6 +4023,392 @@ function RecoveryPanel({ recovery, loading, error, onRefresh, onRun }) {
   );
 }
 
+function modelApiDraft(item = {}) {
+  return {
+    ...item,
+    apiKey: "",
+    clearApiKey: false,
+    modelsText: array(item.models).join("\n")
+  };
+}
+
+const MODEL_API_ICON_BY_PROVIDER = {
+  openai: "hub",
+  claude: "psychology",
+  gemini: "auto_awesome",
+  grok: "bolt",
+  deepseek: "travel_explore",
+  qwen: "neurology",
+  glm: "polyline",
+  kimi: "dark_mode"
+};
+
+function modelApiIcon(provider) {
+  return MODEL_API_ICON_BY_PROVIDER[provider] || "key";
+}
+
+function modelApiRowStatus(provider = {}, draft = {}, testResult = null) {
+  if (testResult?.pending) return { label: "测试中", tone: "testing" };
+  if (testResult?.ok) return { label: "测试通过", tone: "ready" };
+  if (testResult && testResult.ok === false) return { label: "测试失败", tone: "failed" };
+  if (draft.enabled && (provider.hasApiKey || draft.apiKey)) return { label: "已启用", tone: "ready" };
+  if (draft.enabled) return { label: "缺 Key", tone: "failed" };
+  if (provider.hasApiKey || draft.apiKey) return { label: "未启用", tone: "saved" };
+  return { label: "未配置", tone: "" };
+}
+
+function ModelApiSettingsPanel({ addLog }) {
+  const [providers, setProviders] = useState(FALLBACK_MODEL_API_PROVIDERS);
+  const [drafts, setDrafts] = useState(() =>
+    Object.fromEntries(FALLBACK_MODEL_API_PROVIDERS.map((item) => [item.provider, modelApiDraft(item)]))
+  );
+  const [selectedProvider, setSelectedProvider] = useState(FALLBACK_MODEL_API_PROVIDERS[0]?.provider || "openai");
+  const [loading, setLoading] = useState(false);
+  const [saving, setSaving] = useState("");
+  const [testing, setTesting] = useState("");
+  const [testResults, setTestResults] = useState({});
+  const [error, setError] = useState("");
+
+  function synchronize(items) {
+    const nextProviders = array(items).length ? items : FALLBACK_MODEL_API_PROVIDERS;
+    setProviders(nextProviders);
+    setSelectedProvider((current) =>
+      nextProviders.some((item) => item.provider === current) ? current : nextProviders[0]?.provider || "openai"
+    );
+    setDrafts((current) =>
+      Object.fromEntries(
+        nextProviders.map((item) => {
+          const existing = current[item.provider];
+          return [
+            item.provider,
+            {
+              ...modelApiDraft(item),
+              apiKey: existing?.apiKey || "",
+              clearApiKey: false
+            }
+          ];
+        })
+      )
+    );
+  }
+
+  async function loadSettings(options = {}) {
+    setLoading(true);
+    setError("");
+    try {
+      const response = await fetch("/api/model-apis", { method: "GET" });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(data.error?.message || `模型 API 设置获取失败（${response.status}）`);
+      synchronize(data.providers);
+      if (!options.silent) addLog("模型 API 设置已刷新", "info");
+    } catch (err) {
+      const message = err.message || String(err);
+      setError(message);
+      if (!options.silent) addLog(`模型 API 设置刷新失败：${message}`, "error");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    loadSettings({ silent: true });
+  }, []);
+
+  function updateDraft(provider, key, value) {
+    setDrafts((current) => ({
+      ...current,
+      [provider]: {
+        ...(current[provider] || modelApiDraft(providers.find((item) => item.provider === provider))),
+        [key]: value
+      }
+    }));
+  }
+
+  async function saveSetting(provider) {
+    const draft = drafts[provider];
+    if (!draft) return;
+    setSaving(provider);
+    setError("");
+    try {
+      const response = await fetch("/api/model-apis", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          provider,
+          enabled: Boolean(draft.enabled),
+          apiKey: draft.apiKey,
+          clearApiKey: Boolean(draft.clearApiKey),
+          baseUrl: draft.baseUrl,
+          defaultModel: draft.defaultModel,
+          models: draft.modelsText,
+          anthropicVersion: draft.anthropicVersion
+        })
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(data.error?.message || `模型 API 保存失败（${response.status}）`);
+      synchronize(data.providers);
+      addLog(`模型 API 已保存：${draft.label || provider}`, "success");
+    } catch (err) {
+      const message = err.message || String(err);
+      setError(message);
+      addLog(`模型 API 保存失败：${message}`, "error");
+    } finally {
+      setSaving("");
+    }
+  }
+
+  async function testSetting(provider) {
+    const draft = drafts[provider];
+    if (!draft) return;
+    setTesting(provider);
+    setError("");
+    setTestResults((current) => ({
+      ...current,
+      [provider]: { pending: true, message: "正在测试连接..." }
+    }));
+    try {
+      const response = await fetch("/api/model-apis", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "test",
+          provider,
+          enabled: Boolean(draft.enabled),
+          apiKey: draft.apiKey,
+          clearApiKey: Boolean(draft.clearApiKey),
+          baseUrl: draft.baseUrl,
+          defaultModel: draft.defaultModel,
+          models: draft.modelsText,
+          anthropicVersion: draft.anthropicVersion
+        })
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(data.error?.message || `模型 API 测试失败（${response.status}）`);
+      setTestResults((current) => ({
+        ...current,
+        [provider]: {
+          ok: true,
+          message: `连接成功 · HTTP ${data.status || 200} · ${Number(data.elapsedMs || 0)}ms`,
+          data
+        }
+      }));
+      addLog(`模型 API 测试通过：${data.label || draft.label || provider}`, "success");
+    } catch (err) {
+      const message = err.message || String(err);
+      setTestResults((current) => ({
+        ...current,
+        [provider]: { ok: false, message }
+      }));
+      addLog(`模型 API 测试失败：${message}`, "error");
+    } finally {
+      setTesting("");
+    }
+  }
+
+  const configuredCount = providers.filter((item) => item.enabled && item.hasApiKey).length;
+  const selected = providers.find((item) => item.provider === selectedProvider) || providers[0];
+  const selectedDraft = selected ? drafts[selected.provider] || modelApiDraft(selected) : null;
+  const selectedTest = selected ? testResults[selected.provider] : null;
+
+  return (
+    <section className="model-api-workspace" aria-label="模型 API 设置">
+      <div className="model-api-hero">
+        <div className="model-api-hero-title">
+          <span className="material-symbols-outlined">key</span>
+          <div>
+            <h2>模型 API</h2>
+            <p>统一管理官方 API Key、第三方 Base URL 和连通性测试。</p>
+          </div>
+        </div>
+        <div className="model-api-actions">
+          <span className="tag">{configuredCount} 已启用</span>
+          <button className="btn" type="button" onClick={() => loadSettings()} disabled={loading}>
+            <span className="material-symbols-outlined">refresh</span>
+            {loading ? "刷新中" : "刷新"}
+          </button>
+        </div>
+      </div>
+      {error ? <div className="error-box">{error}</div> : null}
+      <div className="model-api-layout">
+        <aside className="model-api-provider-list" aria-label="模型 API 列表">
+          {providers.map((provider) => {
+            const draft = drafts[provider.provider] || modelApiDraft(provider);
+            const isSelected = selected?.provider === provider.provider;
+            const status = modelApiRowStatus(provider, draft, testResults[provider.provider]);
+            return (
+              <button
+                type="button"
+                className={`model-api-provider-row ${isSelected ? "selected" : ""}`}
+                key={provider.provider}
+                onClick={() => setSelectedProvider(provider.provider)}
+              >
+                <span className="model-api-provider-icon material-symbols-outlined">
+                  {modelApiIcon(provider.provider)}
+                </span>
+                <span>
+                  <strong>{provider.label}</strong>
+                  <small>{provider.protocol === "anthropic" ? "Anthropic Messages" : "OpenAI compatible"}</small>
+                </span>
+                <em className={status.tone}>{status.label}</em>
+              </button>
+            );
+          })}
+        </aside>
+
+        {selected && selectedDraft ? (
+          <article className="model-api-editor">
+            <header className="model-api-editor-head">
+              <div className="model-api-editor-title">
+                <span className="model-api-provider-icon material-symbols-outlined">
+                  {modelApiIcon(selected.provider)}
+                </span>
+                <div>
+                  <h3>{selected.label}</h3>
+                  <p>{selected.protocol === "anthropic" ? "Messages API" : "Chat Completions API"}</p>
+                </div>
+              </div>
+              <label className="model-api-switch">
+                <input
+                  type="checkbox"
+                  checked={Boolean(selectedDraft.enabled)}
+                  onChange={(event) => updateDraft(selected.provider, "enabled", event.target.checked)}
+                />
+                <span>{selectedDraft.enabled ? "已启用" : "未启用"}</span>
+              </label>
+            </header>
+
+            <div className="model-api-meta-strip">
+              <span className={`pill ${selected.hasApiKey ? "completed" : "pending"}`}>
+                {selected.hasApiKey ? `Key ${selected.apiKeyMasked}` : "未保存 Key"}
+              </span>
+              <code>{array(selected.prefixes).join(" ")}</code>
+              <code>{selected.chatUrl}</code>
+            </div>
+
+            <div className="model-api-form-grid">
+              <div className="field wide">
+                <label htmlFor={`${selected.provider}-base-url`}>Base URL</label>
+                <input
+                  id={`${selected.provider}-base-url`}
+                  type="url"
+                  value={selectedDraft.baseUrl || ""}
+                  onChange={(event) => updateDraft(selected.provider, "baseUrl", event.target.value)}
+                  autoComplete="off"
+                />
+              </div>
+              <div className="field wide">
+                <label htmlFor={`${selected.provider}-key`}>API Key</label>
+                <input
+                  id={`${selected.provider}-key`}
+                  type="password"
+                  value={selectedDraft.apiKey || ""}
+                  onChange={(event) => updateDraft(selected.provider, "apiKey", event.target.value)}
+                  placeholder={selected.hasApiKey ? "留空保留当前 Key" : "粘贴 API Key"}
+                  autoComplete="new-password"
+                />
+              </div>
+              <div className="field">
+                <label htmlFor={`${selected.provider}-default-model`}>默认模型</label>
+                <input
+                  id={`${selected.provider}-default-model`}
+                  type="text"
+                  value={selectedDraft.defaultModel || ""}
+                  onChange={(event) => updateDraft(selected.provider, "defaultModel", event.target.value)}
+                />
+              </div>
+              {selected.protocol === "anthropic" ? (
+                <div className="field">
+                  <label htmlFor={`${selected.provider}-version`}>API Version</label>
+                  <input
+                    id={`${selected.provider}-version`}
+                    type="text"
+                    value={selectedDraft.anthropicVersion || "2023-06-01"}
+                    onChange={(event) => updateDraft(selected.provider, "anthropicVersion", event.target.value)}
+                  />
+                </div>
+              ) : null}
+              <div className="field wide">
+                <label htmlFor={`${selected.provider}-models`}>模型列表</label>
+                <textarea
+                  id={`${selected.provider}-models`}
+                  value={selectedDraft.modelsText || ""}
+                  onChange={(event) => updateDraft(selected.provider, "modelsText", event.target.value)}
+                  spellCheck="false"
+                />
+              </div>
+            </div>
+
+            <div className="model-api-samples" aria-label="常用模型">
+              {array(selected.sampleModels).map((model) => (
+                <button
+                  className="model-api-chip"
+                  key={model}
+                  type="button"
+                  onClick={() => updateDraft(selected.provider, "defaultModel", model)}
+                >
+                  {model}
+                </button>
+              ))}
+            </div>
+
+            <label className="model-api-clear-key">
+              <input
+                type="checkbox"
+                checked={Boolean(selectedDraft.clearApiKey)}
+                onChange={(event) => updateDraft(selected.provider, "clearApiKey", event.target.checked)}
+              />
+              <span>保存时清除已保存 Key</span>
+            </label>
+
+            {selectedTest ? (
+              <div
+                className={`model-api-test-result ${
+                  selectedTest.pending ? "pending" : selectedTest.ok ? "success" : "error"
+                }`}
+              >
+                <span className="material-symbols-outlined">
+                  {selectedTest.pending ? "sync" : selectedTest.ok ? "check_circle" : "error"}
+                </span>
+                <div>
+                  <strong>{selectedTest.ok ? "连接可用" : selectedTest.pending ? "测试中" : "连接失败"}</strong>
+                  <p>{selectedTest.message}</p>
+                </div>
+              </div>
+            ) : null}
+
+            <footer className="model-api-footer">
+              <a className="link-btn" href={selected.docsUrl} target="_blank" rel="noreferrer">
+                <span className="material-symbols-outlined">article</span>
+                官方文档
+              </a>
+              <button
+                className="btn"
+                type="button"
+                onClick={() => testSetting(selected.provider)}
+                disabled={testing === selected.provider}
+              >
+                <span className="material-symbols-outlined">
+                  {testing === selected.provider ? "sync" : "network_check"}
+                </span>
+                {testing === selected.provider ? "测试中" : "测试连接"}
+              </button>
+              <button
+                className="btn primary"
+                type="button"
+                onClick={() => saveSetting(selected.provider)}
+                disabled={saving === selected.provider}
+              >
+                <span className="material-symbols-outlined">save</span>
+                {saving === selected.provider ? "保存中" : "保存配置"}
+              </button>
+            </footer>
+          </article>
+        ) : null}
+      </div>
+    </section>
+  );
+}
+
 function SettingsDrawer({
   open,
   tab,
@@ -4171,16 +4431,6 @@ function SettingsDrawer({
   const [pools, setPools] = useState(modelSettings.pools || cloneDefaultPools());
   const [prompts, setPrompts] = useState(promptSettings);
   const [budgets, setBudgets] = useState(budgetSettings);
-  const [providerStatus, setProviderStatus] = useState({
-    supportedProviders: FALLBACK_SUPPORTED_PROVIDERS,
-    connections: [],
-    providerNodes: [],
-    providerGroups: {}
-  });
-  const [providerForm, setProviderForm] = useState(() => emptyProviderForm());
-  const [providerNodeForm, setProviderNodeForm] = useState(() => emptyProviderNodeForm());
-  const [providerLoading, setProviderLoading] = useState(false);
-  const [providerError, setProviderError] = useState("");
   const promptImportRef = useRef(null);
 
   useEffect(() => {
@@ -4195,349 +4445,6 @@ function SettingsDrawer({
     setPrompts(normalizePromptSettings(promptSettings));
     setBudgets(normalizeBudgetSettings(budgetSettings));
   }, [open, modelSettings, promptSettings, budgetSettings]);
-
-  useEffect(() => {
-    if (!open || tab !== "providers") return;
-    refreshProviders({ silent: true }).catch(() => {});
-  }, [open, tab]);
-
-  function emptyProviderForm(overrides = {}) {
-    return {
-      id: "",
-      provider: "openrouter",
-      name: "",
-      apiKey: "",
-      baseUrl: "",
-      defaultModel: "",
-      priority: 1,
-      isActive: true,
-      ...overrides
-    };
-  }
-
-  function emptyProviderNodeForm(overrides = {}) {
-    return {
-      id: "",
-      name: "",
-      prefix: "",
-      type: "openai-compatible",
-      apiType: "chat",
-      baseUrl: "",
-      models: "",
-      ...overrides
-    };
-  }
-
-  function providerLabel(provider) {
-    const match = array(providerStatus.supportedProviders).find((item) => item.id === provider);
-    return match?.label || provider || "供应商";
-  }
-
-  function providerMeta(provider) {
-    return array(providerStatus.supportedProviders).find((item) => item.id === provider) || {};
-  }
-
-  function providerCount(provider) {
-    return array(providerStatus.connections).filter((connection) => connection.provider === provider).length;
-  }
-
-  function providerSampleModels(provider) {
-    const meta = providerMeta(provider);
-    return array(meta.sampleModels).length
-      ? meta.sampleModels
-      : array(meta.models)
-          .slice(0, 4)
-          .map((model) => `${meta.alias || provider}/${model.id || model}`);
-  }
-
-  function providerGroup(groupKey, fallback) {
-    const grouped = providerStatus.providerGroups || {};
-    const values = array(grouped[groupKey]);
-    if (values.length) return values;
-    return array(providerStatus.supportedProviders).filter((provider) => {
-      if (fallback === "custom") return provider.custom || provider.category === "custom";
-      if (fallback === "oauth") return provider.authType === "oauth" || provider.category === "oauth";
-      return provider.authType === "apikey" && !provider.custom;
-    });
-  }
-
-  async function refreshProviders(options = {}) {
-    setProviderLoading(true);
-    setProviderError("");
-    try {
-      const response = await fetch("/api/agent-route/run", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "provider_status" })
-      });
-      const data = await response.json().catch(() => ({}));
-      if (!response.ok)
-        throw new Error(data.error?.message || data.message || `供应商状态获取失败（${response.status}）`);
-      const status = data.providerSettings || {
-        supportedProviders: data.supportedProviders || FALLBACK_SUPPORTED_PROVIDERS,
-        connections: data.providers || []
-      };
-      setProviderStatus({
-        ...status,
-        supportedProviders: array(status.supportedProviders).length
-          ? status.supportedProviders
-          : FALLBACK_SUPPORTED_PROVIDERS,
-        connections: array(status.connections || data.providers),
-        providerNodes: array(status.providerNodes),
-        providerGroups: status.providerGroups || {}
-      });
-      if (!options.silent) addLog("供应商设置已刷新", "info");
-      return status;
-    } catch (err) {
-      setProviderError(err.message || String(err));
-      if (!options.silent) addLog(`供应商设置刷新失败：${err.message || String(err)}`, "error");
-      throw err;
-    } finally {
-      setProviderLoading(false);
-    }
-  }
-
-  function editProvider(connection) {
-    if (!connection) {
-      setProviderForm(emptyProviderForm());
-      return;
-    }
-    setProviderForm(
-      emptyProviderForm({
-        id: connection.id || "",
-        provider: connection.provider || "openrouter",
-        name: connection.name || "",
-        apiKey: "",
-        baseUrl: connection.baseUrl || "",
-        defaultModel: connection.defaultModel || "",
-        priority: Number(connection.priority || 1),
-        isActive: connection.isActive !== false
-      })
-    );
-    setProviderError("");
-  }
-
-  function updateProviderForm(key, value) {
-    setProviderForm((current) => ({ ...current, [key]: value }));
-  }
-
-  function editProviderNode(node) {
-    if (!node) {
-      setProviderNodeForm(emptyProviderNodeForm());
-      return;
-    }
-    setProviderNodeForm(
-      emptyProviderNodeForm({
-        id: node.id || "",
-        name: node.name || "",
-        prefix: node.prefix || "",
-        type: node.type || "openai-compatible",
-        apiType: node.apiType || "chat",
-        baseUrl: node.baseUrl || "",
-        models: array(node.models)
-          .map((model) => model.id || model)
-          .join("\n")
-      })
-    );
-  }
-
-  function updateProviderNodeForm(key, value) {
-    setProviderNodeForm((current) => ({ ...current, [key]: value }));
-  }
-
-  async function saveProvider() {
-    const isNew = !providerForm.id;
-    const meta = providerMeta(providerForm.provider);
-    if (meta.authType === "oauth") {
-      setProviderError("OAuth 连接需要走授权弹窗或 token 导入流程，请在右侧供应商管理页面打开对应供应商后点击授权。");
-      return;
-    }
-    if (isNew && !String(providerForm.apiKey || "").trim()) {
-      setProviderError("新建供应商连接需要填写 API Key。已有连接留空则保留旧 Key。");
-      return;
-    }
-    setProviderLoading(true);
-    setProviderError("");
-    try {
-      const response = await fetch("/api/agent-route/run", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          action: "save_provider",
-          id: providerForm.id,
-          provider: providerForm.provider,
-          name: providerForm.name,
-          apiKey: providerForm.apiKey,
-          baseUrl: providerForm.baseUrl,
-          defaultModel: providerForm.defaultModel,
-          priority: Number(providerForm.priority || 1),
-          isActive: Boolean(providerForm.isActive)
-        })
-      });
-      const data = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(data.error?.message || data.message || `供应商保存失败（${response.status}）`);
-      const status = data.providerSettings || {};
-      setProviderStatus({
-        ...status,
-        supportedProviders: array(status.supportedProviders).length
-          ? status.supportedProviders
-          : FALLBACK_SUPPORTED_PROVIDERS,
-        connections: array(status.connections || data.providers),
-        providerNodes: array(status.providerNodes),
-        providerGroups: status.providerGroups || {}
-      });
-      setProviderForm(emptyProviderForm({ provider: providerForm.provider }));
-      addLog(`供应商设置已保存：${providerLabel(providerForm.provider)}`, "success");
-    } catch (err) {
-      setProviderError(err.message || String(err));
-      addLog(`供应商设置保存失败：${err.message || String(err)}`, "error");
-    } finally {
-      setProviderLoading(false);
-    }
-  }
-
-  async function deleteProvider(connection) {
-    if (!connection?.id) return;
-    if (!window.confirm(`确定删除供应商连接「${connection.name || providerLabel(connection.provider)}」吗？`)) return;
-    setProviderLoading(true);
-    setProviderError("");
-    try {
-      const response = await fetch("/api/agent-route/run", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "delete_provider", id: connection.id })
-      });
-      const data = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(data.error?.message || data.message || `供应商删除失败（${response.status}）`);
-      const status = data.providerSettings || {};
-      setProviderStatus({
-        ...status,
-        supportedProviders: array(status.supportedProviders).length
-          ? status.supportedProviders
-          : FALLBACK_SUPPORTED_PROVIDERS,
-        connections: array(status.connections || data.providers),
-        providerNodes: array(status.providerNodes),
-        providerGroups: status.providerGroups || {}
-      });
-      if (providerForm.id === connection.id) setProviderForm(emptyProviderForm());
-      addLog(`供应商连接已删除：${connection.name || providerLabel(connection.provider)}`, "warn");
-    } catch (err) {
-      setProviderError(err.message || String(err));
-      addLog(`供应商删除失败：${err.message || String(err)}`, "error");
-    } finally {
-      setProviderLoading(false);
-    }
-  }
-
-  async function testProvider(connection) {
-    if (!connection?.id) return;
-    setProviderLoading(true);
-    setProviderError("");
-    try {
-      const response = await fetch("/api/agent-route/run", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "test_provider", id: connection.id })
-      });
-      const data = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(data.error?.message || data.message || `供应商测试失败（${response.status}）`);
-      const status = data.providerSettings || {};
-      setProviderStatus({
-        ...status,
-        supportedProviders: array(status.supportedProviders).length
-          ? status.supportedProviders
-          : FALLBACK_SUPPORTED_PROVIDERS,
-        connections: array(status.connections || data.providers),
-        providerNodes: array(status.providerNodes),
-        providerGroups: status.providerGroups || {}
-      });
-      addLog(data.message || "供应商连接测试已完成", data.valid ? "success" : "warn");
-    } catch (err) {
-      setProviderError(err.message || String(err));
-      addLog(`供应商测试失败：${err.message || String(err)}`, "error");
-    } finally {
-      setProviderLoading(false);
-    }
-  }
-
-  async function saveProviderNode() {
-    if (!String(providerNodeForm.prefix || "").trim() || !String(providerNodeForm.baseUrl || "").trim()) {
-      setProviderError("自定义 Provider 需要填写前缀和 Base URL。");
-      return;
-    }
-    setProviderLoading(true);
-    setProviderError("");
-    try {
-      const response = await fetch("/api/agent-route/run", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          action: "save_provider_node",
-          id: providerNodeForm.id || providerNodeForm.prefix,
-          name: providerNodeForm.name,
-          prefix: providerNodeForm.prefix,
-          type: providerNodeForm.type,
-          apiType: providerNodeForm.apiType,
-          baseUrl: providerNodeForm.baseUrl,
-          models: providerNodeForm.models
-        })
-      });
-      const data = await response.json().catch(() => ({}));
-      if (!response.ok)
-        throw new Error(data.error?.message || data.message || `自定义 Provider 保存失败（${response.status}）`);
-      const status = data.providerSettings || {};
-      setProviderStatus({
-        ...status,
-        supportedProviders: array(status.supportedProviders).length
-          ? status.supportedProviders
-          : FALLBACK_SUPPORTED_PROVIDERS,
-        connections: array(status.connections || data.providers),
-        providerNodes: array(status.providerNodes),
-        providerGroups: status.providerGroups || {}
-      });
-      setProviderNodeForm(emptyProviderNodeForm());
-      addLog("自定义 Provider 已保存", "success");
-    } catch (err) {
-      setProviderError(err.message || String(err));
-      addLog(`自定义 Provider 保存失败：${err.message || String(err)}`, "error");
-    } finally {
-      setProviderLoading(false);
-    }
-  }
-
-  async function deleteProviderNode(node) {
-    if (!node?.id) return;
-    if (!window.confirm(`确定删除自定义 Provider「${node.name || node.id}」以及它的连接吗？`)) return;
-    setProviderLoading(true);
-    setProviderError("");
-    try {
-      const response = await fetch("/api/agent-route/run", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "delete_provider_node", id: node.id })
-      });
-      const data = await response.json().catch(() => ({}));
-      if (!response.ok)
-        throw new Error(data.error?.message || data.message || `自定义 Provider 删除失败（${response.status}）`);
-      const status = data.providerSettings || {};
-      setProviderStatus({
-        ...status,
-        supportedProviders: array(status.supportedProviders).length
-          ? status.supportedProviders
-          : FALLBACK_SUPPORTED_PROVIDERS,
-        connections: array(status.connections || data.providers),
-        providerNodes: array(status.providerNodes),
-        providerGroups: status.providerGroups || {}
-      });
-      if (providerNodeForm.id === node.id) setProviderNodeForm(emptyProviderNodeForm());
-      addLog("自定义 Provider 已删除", "warn");
-    } catch (err) {
-      setProviderError(err.message || String(err));
-      addLog(`自定义 Provider 删除失败：${err.message || String(err)}`, "error");
-    } finally {
-      setProviderLoading(false);
-    }
-  }
 
   function updatePool(pool, value) {
     setPools((current) => ({ ...current, [pool]: readModelLines(value, DEFAULT_MODEL_POOLS[pool]) }));
@@ -4768,345 +4675,6 @@ function SettingsDrawer({
               关闭
             </button>
           </div>
-        </div>
-
-        <div className="settings-tab-panel" data-settings-panel="providers" hidden={tab !== "providers"}>
-          <section className="settings-card">
-            <div className="field">
-              <label>供应商管理</label>
-              <div className="model-help">
-                已按原供应商管理模型恢复 OAuth 供应商、API Key 供应商和自定义 Provider 节点。API Key
-                只写入本地数据库，页面不会回显明文；OAuth 请在供应商详情页使用授权弹窗或手动导入完成连接。
-              </div>
-            </div>
-            <div className="model-actions">
-              <button className="btn" type="button" onClick={() => refreshProviders()} disabled={providerLoading}>
-                <span className="material-symbols-outlined">refresh</span>刷新供应商
-              </button>
-              <button className="btn" type="button" onClick={() => editProvider(null)} disabled={providerLoading}>
-                <span className="material-symbols-outlined">add_circle</span>新增连接
-              </button>
-            </div>
-            {providerError ? <div className="error-box">{providerError}</div> : null}
-          </section>
-
-          <div className="provider-catalog-grid">
-            {[
-              ["oauthProviders", "oauth", "OAuth / 订阅供应商", "原供应商管理中的 CLI/OAuth 账号入口"],
-              [
-                "apiKeyProviders",
-                "apikey",
-                "API Key 供应商",
-                "可保存本地 Key；OpenAI-compatible 会进入 Agent 内部模型调用"
-              ],
-              ["customProviders", "custom", "自定义 Provider", "用自己的 OpenAI-compatible 节点扩展模型前缀"]
-            ].map(([groupKey, fallback, title, hint]) => (
-              <section className="settings-card provider-catalog-section" key={groupKey}>
-                <div className="provider-list-head">
-                  <div>
-                    <strong>{title}</strong>
-                    <p>{hint}</p>
-                  </div>
-                  <span className="tag">{providerGroup(groupKey, fallback).length}</span>
-                </div>
-                <div className="provider-card-list">
-                  {providerGroup(groupKey, fallback).length ? (
-                    providerGroup(groupKey, fallback).map((provider) => {
-                      const count = providerCount(provider.id);
-                      const samples = providerSampleModels(provider.id);
-                      return (
-                        <button
-                          className={`provider-card ${providerForm.provider === provider.id ? "selected" : ""}`}
-                          key={provider.id}
-                          type="button"
-                          onClick={() => updateProviderForm("provider", provider.id)}
-                        >
-                          <span>
-                            <strong>{provider.label || provider.name || provider.id}</strong>
-                            <small>
-                              {provider.alias ? `${provider.alias}/` : provider.id}
-                              {provider.authType === "oauth"
-                                ? " · OAuth"
-                                : provider.custom
-                                  ? " · Custom"
-                                  : " · API Key"}
-                            </small>
-                          </span>
-                          <span className="provider-card-meta">
-                            <span>{count} 个连接</span>
-                            <span>{samples.slice(0, 2).join("，") || "未配置模型示例"}</span>
-                          </span>
-                        </button>
-                      );
-                    })
-                  ) : (
-                    <div className="empty compact">暂无条目</div>
-                  )}
-                </div>
-              </section>
-            ))}
-          </div>
-
-          <div className="provider-settings-grid">
-            <section className="settings-card">
-              <div className="field">
-                <label htmlFor="providerSelect">供应商</label>
-                <select
-                  id="providerSelect"
-                  value={providerForm.provider}
-                  onChange={(event) => updateProviderForm("provider", event.target.value)}
-                >
-                  {array(providerStatus.supportedProviders).map((provider) => (
-                    <option key={provider.id} value={provider.id}>
-                      {provider.label || provider.id}
-                    </option>
-                  ))}
-                </select>
-                {providerMeta(providerForm.provider).authType === "oauth" ? (
-                  <div className="model-help warning">
-                    这个 OAuth 供应商需要通过供应商详情页的授权弹窗或 token 导入完成连接；这里仅用于查看目录和已有连接。
-                  </div>
-                ) : null}
-              </div>
-              <div className="field">
-                <label htmlFor="providerName">连接名称</label>
-                <input
-                  id="providerName"
-                  type="text"
-                  value={providerForm.name}
-                  onChange={(event) => updateProviderForm("name", event.target.value)}
-                  placeholder={`${providerLabel(providerForm.provider)} 主账号`}
-                />
-              </div>
-              <div className="field">
-                <label htmlFor="providerApiKey">API Key</label>
-                <input
-                  id="providerApiKey"
-                  type="password"
-                  disabled={providerMeta(providerForm.provider).authType === "oauth"}
-                  value={providerForm.apiKey}
-                  onChange={(event) => updateProviderForm("apiKey", event.target.value)}
-                  placeholder={providerForm.id ? "留空则保留已保存 Key" : "粘贴供应商 API Key"}
-                  autoComplete="off"
-                />
-                <div className="model-help">保存后只显示脱敏状态，不会把 Key 放进 localStorage 或页面日志。</div>
-              </div>
-              <div className="field">
-                <label htmlFor="providerBaseUrl">自定义 Base URL（可选）</label>
-                <input
-                  id="providerBaseUrl"
-                  type="url"
-                  value={providerForm.baseUrl}
-                  onChange={(event) => updateProviderForm("baseUrl", event.target.value)}
-                  placeholder="留空使用内置 OpenAI-compatible endpoint"
-                />
-              </div>
-              <div className="field">
-                <label htmlFor="providerDefaultModel">默认模型（可选）</label>
-                <input
-                  id="providerDefaultModel"
-                  type="text"
-                  value={providerForm.defaultModel}
-                  onChange={(event) => updateProviderForm("defaultModel", event.target.value)}
-                  placeholder={providerSampleModels(providerForm.provider)[0] || "例如 openrouter/auto"}
-                />
-              </div>
-              <div className="provider-inline-fields">
-                <BudgetNumber
-                  label="优先级"
-                  value={providerForm.priority}
-                  onChange={(value) => updateProviderForm("priority", value)}
-                />
-                <label className="toggle-row compact">
-                  <input
-                    type="checkbox"
-                    checked={Boolean(providerForm.isActive)}
-                    onChange={(event) => updateProviderForm("isActive", event.target.checked)}
-                  />
-                  <span>
-                    <strong>启用连接</strong>
-                    <small>关闭后不会被模型代理使用。</small>
-                  </span>
-                </label>
-              </div>
-              <div className="model-actions">
-                <button className="btn primary" type="button" onClick={saveProvider} disabled={providerLoading}>
-                  <span className="material-symbols-outlined">save</span>
-                  {providerForm.id ? "保存连接" : "新增连接"}
-                </button>
-                <button className="btn" type="button" onClick={() => editProvider(null)} disabled={providerLoading}>
-                  清空表单
-                </button>
-              </div>
-            </section>
-
-            <section className="settings-card">
-              <div className="provider-list-head">
-                <div>
-                  <strong>已配置连接</strong>
-                  <p>{array(providerStatus.connections).length} 个供应商连接</p>
-                </div>
-                {providerLoading ? <span className="tag">同步中</span> : null}
-              </div>
-              <div className="provider-list">
-                {array(providerStatus.connections).length ? (
-                  array(providerStatus.connections).map((connection) => (
-                    <article className={`provider-item ${connection.isActive ? "active" : ""}`} key={connection.id}>
-                      <div className="provider-item-main">
-                        <div>
-                          <strong>{connection.name || providerLabel(connection.provider)}</strong>
-                          <p>
-                            {providerLabel(connection.provider)} · 优先级 {connection.priority || 1}
-                          </p>
-                        </div>
-                        <span className={`pill ${connection.isActive ? "completed" : "cancelled"}`}>
-                          {connection.isActive ? "启用" : "停用"}
-                        </span>
-                      </div>
-                      <div className="provider-meta">
-                        <span>{connection.hasApiKey ? `Key ${connection.apiKeyMasked}` : "未保存 Key"}</span>
-                        <span>{connection.baseUrl || "使用内置 endpoint"}</span>
-                      </div>
-                      <div className="model-actions">
-                        <button className="btn" type="button" onClick={() => editProvider(connection)}>
-                          编辑
-                        </button>
-                        <button className="btn" type="button" onClick={() => testProvider(connection)}>
-                          测试
-                        </button>
-                        <button className="btn danger" type="button" onClick={() => deleteProvider(connection)}>
-                          删除
-                        </button>
-                      </div>
-                    </article>
-                  ))
-                ) : (
-                  <div className="empty compact">
-                    暂无供应商连接。新增后，Agent 内部模型调用会按模型前缀自动选择供应商。
-                  </div>
-                )}
-              </div>
-            </section>
-          </div>
-
-          <section className="settings-card">
-            <div className="provider-list-head">
-              <div>
-                <strong>自定义 Provider 节点</strong>
-                <p>对应原供应商管理的 Custom Providers，用模型前缀接入自己的 OpenAI-compatible endpoint。</p>
-              </div>
-              <button className="btn" type="button" onClick={() => editProviderNode(null)} disabled={providerLoading}>
-                清空节点表单
-              </button>
-            </div>
-            <div className="provider-node-grid">
-              <div className="provider-node-form">
-                <div className="provider-inline-fields">
-                  <div className="field">
-                    <label htmlFor="providerNodeName">名称</label>
-                    <input
-                      id="providerNodeName"
-                      type="text"
-                      value={providerNodeForm.name}
-                      onChange={(event) => updateProviderNodeForm("name", event.target.value)}
-                      placeholder="我的模型节点"
-                    />
-                  </div>
-                  <div className="field">
-                    <label htmlFor="providerNodePrefix">模型前缀</label>
-                    <input
-                      id="providerNodePrefix"
-                      type="text"
-                      value={providerNodeForm.prefix}
-                      onChange={(event) => updateProviderNodeForm("prefix", event.target.value)}
-                      placeholder="myapi"
-                    />
-                  </div>
-                </div>
-                <div className="provider-inline-fields">
-                  <div className="field">
-                    <label htmlFor="providerNodeType">类型</label>
-                    <select
-                      id="providerNodeType"
-                      value={providerNodeForm.type}
-                      onChange={(event) => updateProviderNodeForm("type", event.target.value)}
-                    >
-                      <option value="openai-compatible">openai-compatible</option>
-                      <option value="anthropic-compatible">anthropic-compatible</option>
-                    </select>
-                  </div>
-                  <div className="field">
-                    <label htmlFor="providerNodeApiType">API 类型</label>
-                    <select
-                      id="providerNodeApiType"
-                      value={providerNodeForm.apiType}
-                      onChange={(event) => updateProviderNodeForm("apiType", event.target.value)}
-                    >
-                      <option value="chat">chat</option>
-                      <option value="responses">responses</option>
-                    </select>
-                  </div>
-                </div>
-                <div className="field">
-                  <label htmlFor="providerNodeBaseUrl">Base URL</label>
-                  <input
-                    id="providerNodeBaseUrl"
-                    type="url"
-                    value={providerNodeForm.baseUrl}
-                    onChange={(event) => updateProviderNodeForm("baseUrl", event.target.value)}
-                    placeholder="https://api.example.com/v1"
-                  />
-                </div>
-                <div className="field">
-                  <label htmlFor="providerNodeModels">模型列表（可选，一行一个）</label>
-                  <textarea
-                    id="providerNodeModels"
-                    value={providerNodeForm.models}
-                    onChange={(event) => updateProviderNodeForm("models", event.target.value)}
-                    placeholder={"model-a\nmodel-b"}
-                    rows={3}
-                  />
-                </div>
-                <div className="model-actions">
-                  <button className="btn primary" type="button" onClick={saveProviderNode} disabled={providerLoading}>
-                    <span className="material-symbols-outlined">save</span>
-                    {providerNodeForm.id ? "保存节点" : "新增节点"}
-                  </button>
-                </div>
-              </div>
-              <div className="provider-list">
-                {array(providerStatus.providerNodes).length ? (
-                  array(providerStatus.providerNodes).map((node) => (
-                    <article className="provider-item active" key={node.id}>
-                      <div className="provider-item-main">
-                        <div>
-                          <strong>{node.name || node.id}</strong>
-                          <p>
-                            {node.prefix || node.id}/ · {node.type}
-                          </p>
-                        </div>
-                        <span className="pill completed">{node.apiType || "chat"}</span>
-                      </div>
-                      <div className="provider-meta">
-                        <span>{node.baseUrl}</span>
-                        <span>{array(node.models).length} 个模型</span>
-                      </div>
-                      <div className="model-actions">
-                        <button className="btn" type="button" onClick={() => editProviderNode(node)}>
-                          编辑节点
-                        </button>
-                        <button className="btn danger" type="button" onClick={() => deleteProviderNode(node)}>
-                          删除节点
-                        </button>
-                      </div>
-                    </article>
-                  ))
-                ) : (
-                  <div className="empty compact">暂无自定义 Provider。新增后可以在连接表单里选择它。</div>
-                )}
-              </div>
-            </div>
-          </section>
         </div>
 
         <div className="settings-tab-panel" data-settings-panel="prompts" hidden={tab !== "prompts"}>

@@ -147,8 +147,28 @@ function testDashboardRecoverySourceWiring() {
   );
   assert.match(
     source,
-    /const internalTasks = array\(next\.tasks\)\.filter\(isRouteInternalTask\)/,
-    "plan updates preserve visible agent decision tasks"
+    /goalFromCheckpointPayload/,
+    "stream task state is now sourced from backend checkpoints"
+  );
+  assert.match(
+    source,
+    /data-agent-checkpoint/,
+    "dashboard subscribes to LangGraph checkpoint events"
+  );
+  assert.doesNotMatch(
+    source,
+    /type === "plan"[\s\S]{0,240}tasks:/,
+    "plan stream events must not replace checkpoint task state"
+  );
+  assert.doesNotMatch(
+    source,
+    /type === "worker_done"[\s\S]{0,240}upsertTask/,
+    "worker stream events must not infer task state"
+  );
+  assert.doesNotMatch(
+    source,
+    new RegExp(["task", "Derived", "Goal", "Status"].join("")),
+    "dashboard must not derive goal status from task status locally"
   );
   assert.doesNotMatch(
     source,
@@ -165,22 +185,30 @@ function testDashboardRecoverySourceWiring() {
   assert.doesNotMatch(source, /\["control",\s*"控制中心"/, "navigation no longer exposes the control center");
   assert.doesNotMatch(source, /暂停所有任务/, "sidebar must not expose the legacy pause-all control");
   assert.match(source, /创建新任务/, "sidebar exposes chat-first new task creation");
+  assert.match(source, /chatFocusRequest/, "new task button emits a visible chat focus request");
+  assert.match(chat, /focusRequest/, "chat panel reacts to new task focus requests");
   assert.match(chat, /id="agentChatInput"/, "chat composer exposes a stable focus target for new tasks");
+  assert.match(chat, /composerPulse/, "chat composer visibly highlights when creating a new task");
+  assert.match(chat, /newTaskMode/, "chat composer opens an explicit new-task mode");
+  assert.match(chat, /新任务已准备好/, "new-task mode gives visible feedback after clicking create task");
+  assert.match(source, /data-reset-agent-route/, "sidebar exposes a reset button for chat and task records");
+  assert.match(source, /function resetAllHistory/, "dashboard can reset persisted chat and task history");
+  assert.match(chat, /resetSignal/, "chat panel responds to dashboard-level reset signals");
+  assert.match(chat, /onResetAll/, "chat clear action delegates to the full history reset when available");
   assert.match(
     chat,
     /event\.currentTarget\.form\?\.requestSubmit\(\)/,
     "chat composer sends with Enter through the form submit path"
   );
-  assert.match(source, /data-open-providers/, "sidebar links to the provider dashboard route");
-  assert.match(source, /\/dashboard\/providers/, "provider settings open the provider dashboard route");
-  const providerPage = fs.readFileSync(
-    path.join(__dirname, "..", "app", "dashboard", "providers", "provider-console.js"),
-    "utf8"
-  );
-  assert.match(providerPage, /OAuth Providers/, "provider dashboard renders OAuth provider catalog");
-  assert.match(providerPage, /Custom Providers/, "provider dashboard renders custom provider node management");
-  assert.match(providerPage, /\/api\/providers/, "provider dashboard uses the provider API backend");
-  assert.match(providerPage, /\/api\/provider-nodes/, "provider dashboard uses the provider node API backend");
+  assert.match(source, /data-open-model-apis/, "sidebar links to the model API settings panel");
+  assert.match(source, /ModelApiSettingsPanel/, "dashboard renders the model API settings panel in-console");
+  assert.match(source, /\/api\/model-apis/, "model API settings use the model API backend");
+  assert.match(source, /测试连接/, "model API settings expose a connection test action");
+  assert.match(source, /model-api-layout/, "model API settings use the split list/editor layout");
+  assert.match(source, /测试通过/, "model API provider list reflects successful connection tests");
+  assert.doesNotMatch(source, /有 Key/, "model API provider list does not use ambiguous key-only status text");
+  assert.doesNotMatch(source, /ProvidersDashboard/, "dashboard no longer embeds the legacy provider console");
+  assert.doesNotMatch(source, /ProviderDetailPage/, "dashboard no longer embeds the legacy provider detail page");
   assert.match(
     fs.readFileSync(path.join(__dirname, "agent", "orchestrator", "action-api.js"), "utf8"),
     /authenticity_status/,
@@ -208,13 +236,18 @@ function testDashboardRecoverySourceWiring() {
   );
   assert.match(
     fs.readFileSync(path.join(__dirname, "agent", "orchestrator", "action-api.js"), "utf8"),
-    /provider_status/,
-    "action API exposes provider status"
+    /legacy_provider_removed/,
+    "action API rejects legacy provider actions"
   );
   assert.match(
     fs.readFileSync(path.join(__dirname, "agent", "orchestrator", "action-api.js"), "utf8"),
     /save_provider_node/,
-    "action API exposes custom provider node management"
+    "action API still names legacy custom provider actions for 410 responses"
+  );
+  assert.match(
+    fs.readFileSync(path.join(__dirname, "agent", "orchestrator", "action-api.js"), "utf8"),
+    /reset_agent_route/,
+    "action API exposes a reset action for chat and task records"
   );
   assert.match(
     fs.readFileSync(path.join(__dirname, "agent", "orchestrator", "runtime.js"), "utf8"),
@@ -248,7 +281,7 @@ function testEventStreamDoesNotMarkFailedFinalAsCompleted() {
   const summary = eventStream.summarizeEvent("final", {
     status: "failed",
     content: "Commander could not create a plan: upstream credits exhausted.",
-    source_model: "openrouter/test"
+    source_model: "qwen/test"
   });
   assert.equal(summary.status, "failed");
   assert.match(summary.failureReason, /credits exhausted/);
@@ -326,6 +359,33 @@ async function testRecoveryActionsStillReturnStructuredSummary() {
   assert.equal(statusJson.recovery.at, runJson.recovery.at);
 }
 
+async function testResetAgentRouteClearsTaskRecords() {
+  taskRuntime.resetRuntime();
+  recovery.resetRecoveryRuntime();
+  observability.setStorageFile(process.env.AGENT_ROUTE_OBSERVABILITY);
+  observability.resetRuntime();
+  taskRuntime.registerGoalTasks(
+    "dashboard-reset-goal",
+    [{ id: "collect", title: "Collect reset evidence", status: "waiting", modelPool: "web" }],
+    { replace: true, source: "dashboard-test" }
+  );
+  observability.recordEvent("TaskQueued", {
+    goalId: "dashboard-reset-goal",
+    taskId: "collect",
+    task: { id: "collect", title: "Collect reset evidence" }
+  });
+
+  const response = await actionApi.handleAgentRouteAction({ action: "reset_agent_route" });
+  const json = await response.json();
+  assert.equal(response.status, 200);
+  assert.equal(json.ok, true);
+  assert.deepEqual(json.goals, []);
+  assert.deepEqual(json.tasks, []);
+  assert.equal(taskRuntime.listGoals().length, 0);
+  assert.equal(taskRuntime.listTasks("dashboard-reset-goal").length, 0);
+  assert.equal(observability.listEvents({ limit: 10 }).length, 0);
+}
+
 async function main() {
   testDashboardRecoverySourceWiring();
   testEventStreamSummarizesFailureReason();
@@ -333,6 +393,7 @@ async function main() {
   testEventStreamUsesLifecycleSpecificPartIds();
   testTaskCreationMetadataRecordsInvoker();
   await testRecoveryActionsStillReturnStructuredSummary();
+  await testResetAgentRouteClearsTaskRecords();
   console.log("agent route dashboard tests passed");
 }
 

@@ -32,7 +32,7 @@ async function runReviewIteration({
   emitStrategy,
   persistGoalBudget,
   taskSummary,
-  callWithFallback,
+  callRoutedModel,
   normalizePromptSettings
 }) {
   const reviewModels = needsLocalExecution ? commanderRoute.models.slice(0, 1) : commanderRoute.models;
@@ -48,7 +48,7 @@ async function runReviewIteration({
     types: ["knowledge", "procedure", "episodic", "working"],
     limit: 8
   }).text;
-  const reviewAttempt = await callWithFallback({
+  const reviewAttempt = await callRoutedModel({
     req,
     nextHandler,
     baseBody: {
@@ -79,7 +79,7 @@ async function runReviewIteration({
         ...data,
         task: taskSummary(reviewTask)
       }),
-    responseFormatKind: protocol.KIND.GOAL_REVIEW,
+    functionCallKind: protocol.KIND.GOAL_REVIEW,
     validateContent: (content) =>
       protocol.validationForCall(content, protocol.KIND.GOAL_REVIEW, (value) =>
         value.status === "done" || value.status === "continue"

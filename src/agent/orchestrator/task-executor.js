@@ -2,7 +2,6 @@
 
 const taskRuntime = require("../tasks");
 const budgetGovernor = require("../budget");
-const dependencyEngine = require("../graph");
 
 const { TASK_STATUS } = taskRuntime;
 
@@ -193,75 +192,7 @@ function isTerminalTaskStatus(status) {
   return status === TASK_STATUS.COMPLETED || status === TASK_STATUS.FAILED || status === TASK_STATUS.CANCELED;
 }
 
-async function drainReadyTasks({
-  goalId,
-  iteration,
-  config,
-  defaultConfig,
-  executedTaskIds,
-  allTasks,
-  runWorkerTask,
-  syncRuntimeTasks,
-  emitGraph,
-  trace
-}) {
-  let pausedTask = null;
-  const maxReadyDrains = Math.max(1, Math.min(60, Number(config.maxTasks || defaultConfig.maxTasks) * 6));
-  let drainedTasks = 0;
-  for (;;) {
-    const graphBeforeRun = emitGraph(dependencyEngine.GRAPH_EVENT.READY_CHANGED, {
-      phase: `iteration:${iteration}`,
-      drained_tasks: drainedTasks
-    });
-    syncRuntimeTasks();
-    const pendingTasks = taskRuntime.readyTasks(goalId).filter((task) => !executedTaskIds.has(task.id));
-    if (!pendingTasks.length) {
-      if (!drainedTasks && graphBeforeRun.blockedChains && graphBeforeRun.blockedChains.length) {
-        trace.push({
-          label: `graph:blocked:${iteration}`,
-          model: "dependency-engine",
-          ok: false,
-          blockedChains: graphBeforeRun.blockedChains.slice(0, 8)
-        });
-      }
-      break;
-    }
-    for (const task of pendingTasks) {
-      const result = await runWorkerTask(task);
-      drainedTasks += 1;
-      syncRuntimeTasks();
-      emitGraph(dependencyEngine.GRAPH_EVENT.UPDATED, { task_id: task.id, status: result.status });
-      const propagatedPausedTask = allTasks.find((item) => isPausedTaskStatus(item));
-      if (propagatedPausedTask) {
-        pausedTask = propagatedPausedTask;
-        break;
-      }
-      if (isPausedTaskStatus(result.task || { status: result.status, blockedReason: result.blockedReason })) {
-        pausedTask = result.task;
-        break;
-      }
-      if (drainedTasks >= maxReadyDrains) {
-        trace.push({
-          label: `graph:drain-limit:${iteration}`,
-          model: "dependency-engine",
-          ok: false,
-          drainedTasks,
-          maxReadyDrains
-        });
-        break;
-      }
-    }
-    if (pausedTask || drainedTasks >= maxReadyDrains) break;
-  }
-  return {
-    pausedTask,
-    drainedTasks,
-    allTasks
-  };
-}
-
 module.exports = {
-  drainReadyTasks,
   isDependencyPropagationBlock,
   isPausedTaskStatus,
   isTerminalTaskStatus,

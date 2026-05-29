@@ -100,6 +100,7 @@ function uiDataPartTypeForEvent(event = "") {
   if (key === "start") return "data-agent-run";
   if (key === "plan") return "data-agent-plan";
   if (key === "graph") return "data-agent-graph";
+  if (key === "checkpoint") return "data-agent-checkpoint";
   if (key === "strategy") return "data-agent-strategy";
   if (key === "memory") return "data-agent-memory";
   if (key === "budget") return "data-agent-budget";
@@ -141,6 +142,7 @@ function uiDataPartIdForEvent(event = "", data = {}, sequence = 0) {
     return `${goalId}:task:${taskId}:${key || "event"}`;
   }
   if (key === "graph") return `${goalId}:graph`;
+  if (key === "checkpoint") return `${goalId}:checkpoint`;
   if (key === "strategy") return `${goalId}:strategy`;
   if (key === "budget") return `${goalId}:budget`;
   if (key === "final") return `${goalId}:final`;
@@ -181,17 +183,26 @@ function wait(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function safeWrite(writer, part) {
+  try {
+    writer.write(part);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 async function writeFinalTextPart(writer, data = {}) {
   const content = String(data.content || data.answerMarkdown || "").trim();
   if (!content) return;
   const goalId = data.goal_id || data.goalId || "goal";
   const id = `${goalId}:final-text`;
-  writer.write({ type: "text-start", id });
+  if (!safeWrite(writer, { type: "text-start", id })) return;
   for (const delta of finalTextChunks(content)) {
-    writer.write({ type: "text-delta", id, delta });
+    if (!safeWrite(writer, { type: "text-delta", id, delta })) return;
     await wait(content.length > 3000 ? 4 : 12);
   }
-  writer.write({ type: "text-end", id });
+  safeWrite(writer, { type: "text-end", id });
 }
 
 async function streamAgentRouteUiMessages(run, { observabilityRuntime, request } = {}) {
@@ -202,6 +213,7 @@ async function streamAgentRouteUiMessages(run, { observabilityRuntime, request }
       let finalSummary = null;
       let sequence = 0;
       let heartbeat = null;
+      let clientWritable = true;
       const pendingTextWrites = [];
       const send = (event, data = {}) => {
         const internalOnly = String(event || "").toLowerCase() === "langgraph";
@@ -223,14 +235,15 @@ async function streamAgentRouteUiMessages(run, { observabilityRuntime, request }
         } catch (err) {
           console.warn("[agent-route] failed to record observability event:", err.message);
         }
-        if (!internalOnly) {
-          writer.write(uiDataPartForEvent(event, streamData, sequence));
+        if (!internalOnly && clientWritable) {
+          clientWritable = safeWrite(writer, uiDataPartForEvent(event, streamData, sequence));
           sequence += 1;
-          if (event === "final") pendingTextWrites.push(writeFinalTextPart(writer, streamData));
+          if (clientWritable && event === "final") pendingTextWrites.push(writeFinalTextPart(writer, streamData));
         }
       };
       heartbeat = setInterval(() => {
-        writer.write({
+        if (!clientWritable) return;
+        clientWritable = safeWrite(writer, {
           type: "data-agent-heartbeat",
           id: `${currentGoalId || "goal"}:heartbeat:${Date.now()}`,
           data: { at: new Date().toISOString() },
@@ -243,7 +256,7 @@ async function streamAgentRouteUiMessages(run, { observabilityRuntime, request }
       } catch (err) {
         const message = err && err.message ? err.message : String(err);
         send("error", { message });
-        writer.write({ type: "error", errorText: message });
+        if (clientWritable) clientWritable = safeWrite(writer, { type: "error", errorText: message });
       } finally {
         if (heartbeat) clearInterval(heartbeat);
         await Promise.all(pendingTextWrites);

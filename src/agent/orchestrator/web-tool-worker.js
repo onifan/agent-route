@@ -119,15 +119,15 @@ function isWebToolType(type = "") {
   );
 }
 
+function isMetaTaskType(type = "") {
+  return /^(planning|plan|strategy|review|verification|decision|final|summary|synthesis)$/i.test(String(type || ""));
+}
+
 function shouldUseWebToolWorker(task = {}, messages = []) {
   const type = String(task.type || "").toLowerCase();
-  const text = taskText(task, messages);
   if (String(task.toolWorker || task.tool_worker || "").toLowerCase() === "web") return true;
   if (isWebToolType(type)) return true;
-  if (extractPublicHttpUrl(text) && /api|http|url|网页|页面|读取|抓取|fetch|read|extract|summari[sz]e/i.test(text)) {
-    return !hasHighRiskWebAction(text);
-  }
-  return hasExternalReadIntent([lastUserText(messages), text].filter(Boolean).join("\n"));
+  return false;
 }
 
 function webActionForTask(task = {}, text = "") {
@@ -185,11 +185,20 @@ function queryClauses(value = "") {
     .replace(/(?:不得|不要|禁止|请勿|do not)[^。.;\n]*/gi, " ");
   return text
     .split(/\n|;|；|,|，|、/i)
-    .map((item) => cleanSearchQueryText(item.replace(/^[\s:：,，、-]+|[\s:：,，、-]+$/g, ""), 180))
+    .map((item) =>
+      cleanSearchQueryText(
+        item
+          .replace(/^(?:queries?|search\s+queries?|candidate\s+queries?|候选查询|搜索查询)\s*[:：]\s*/i, "")
+          .replace(/^[\s:：,，、-]+|[\s:：,，、-]+$/g, ""),
+        180
+      )
+    )
     .filter((item) => item.length >= 4 && item.length <= 160)
     .filter(
       (item) =>
-        !/^(返回|包含|说明|记录|不得|不要|最终|success|criteria|url|http status|title|text evidence)/i.test(item)
+        !/^(queries?|search queries?|candidate queries?|候选查询|搜索查询|返回|包含|说明|记录|不得|不要|最终|success|criteria|url|http status|title|text evidence)$/i.test(
+          item
+        )
     );
 }
 
@@ -486,6 +495,8 @@ module.exports = {
   extractPublicHttpUrl,
   extractPublicHttpUrls,
   hasExternalReadIntent,
+  isMetaTaskType,
+  isWebToolType,
   isPublicHttpUrl,
   runWebToolWorker,
   searchQuery,

@@ -16,8 +16,7 @@ const DEFAULT_AGENT_ROUTE_RUNTIME_POLICY = Object.freeze({
   verifierModelEnabled: true,
   verifierTimeoutMs: 45000,
   discoveryTimeoutMs: 2500,
-  dynamicFreeModels: true,
-  openRouterModelsEndpoint: "https://openrouter.ai/api/v1/models"
+  dynamicFreeModels: false
 });
 
 module.exports = {

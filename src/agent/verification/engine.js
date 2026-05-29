@@ -91,6 +91,25 @@ function clone(value) {
   return value == null ? value : JSON.parse(JSON.stringify(value));
 }
 
+function verificationPolicy(input = {}) {
+  const source = input && input.verificationPolicy ? input.verificationPolicy : input || {};
+  return {
+    ...DEFAULT_VERIFICATION_POLICY,
+    confidence: {
+      ...DEFAULT_VERIFICATION_POLICY.confidence,
+      ...((source && source.confidence) || {})
+    },
+    failureHandling: {
+      ...DEFAULT_VERIFICATION_POLICY.failureHandling,
+      ...((source && source.failureHandling) || {})
+    },
+    semantic: {
+      ...DEFAULT_VERIFICATION_POLICY.semantic,
+      ...((source && source.semantic) || {})
+    }
+  };
+}
+
 function collapseText(value) {
   return String(value == null ? "" : value)
     .replace(/\s+/g, " ")
@@ -429,6 +448,14 @@ function addIssue(state, issue, severity = "medium", retryable = true, confidenc
   state.confidence -= confidencePenalty;
 }
 
+function addRequiredEvidenceGap(state, issue, severity = "medium", retryable = true, confidencePenalty = 0.12) {
+  const text = collapseText(issue);
+  if (!text) return;
+  state.requiredEvidenceGaps = Array.isArray(state.requiredEvidenceGaps) ? state.requiredEvidenceGaps : [];
+  state.requiredEvidenceGaps.push(text);
+  addIssue(state, text, severity, retryable, confidencePenalty);
+}
+
 function addRiskFinding(state, riskLevel, reason, details = {}, blockedReason = "") {
   const normalized = riskEngine.normalizeRiskLevel(riskLevel || "medium");
   const finding = {
@@ -468,6 +495,14 @@ function evidenceRequirementKind(task = {}, workerResult = {}) {
   const type = String(task.type || "").toLowerCase();
   const toolWorker = String(task.toolWorker || task.tool_worker || "").toLowerCase();
   const model = String(workerResult.model || workerResult.context?.model || "").toLowerCase();
+  if (
+    toolWorker === "files" ||
+    model === "files-tool" ||
+    /^(local_read|file_read|files_read|filesystem_read|directory_read|project_read|repo_read|repository_read)$/.test(
+      type
+    )
+  )
+    return "local_file";
   if (/shell|terminal|local_execution/.test(type) || String(task.modelPool || "").toLowerCase() === "codex-cli")
     return "shell_execution";
   if (
@@ -485,6 +520,7 @@ function evidenceRequirementKind(task = {}, workerResult = {}) {
 function evidenceRequirementFields(kind = "") {
   if (kind === "web_search_result" || kind === "web_page") return ["url", "status", "title", "text", "timestamp"];
   if (kind === "api_response") return ["url", "status", "body", "timestamp"];
+  if (kind === "local_file") return ["path", "exists", "size", "text", "timestamp"];
   if (kind === "file_artifact") return ["path", "fileType", "size", "hash", "createdAt"];
   if (kind === "browser_observation") return ["url", "title", "visibleText", "timestamp"];
   if (kind === "shell_execution") return ["command", "exitCode", "stdout", "stderr", "timestamp"];
@@ -1183,23 +1219,26 @@ function evaluateWebSearchRelevanceVerification(state, task = {}, workerResult =
   const clauseQueries = webSearchQueryClauses(task);
   const hasResponseQuery = resultPageResponses.some((response) => responseQueryKey(response));
   if (clauseQueries.length > 1 && hasResponseQuery) {
-    let missingOrUnrelated = false;
     let bestMatched = [];
     let matchedClauseResponse = false;
+    let matchedRequiredClauses = 0;
+    const requiredClauseGaps = [];
     const requireEveryClause = requiresEveryWebSearchQueryClause(task);
     for (const clause of clauseQueries) {
       const clauseKey = queryKey(clause);
       const clauseResponses = resultPageResponses.filter((response) => responseQueryKey(response) === clauseKey);
       if (!clauseResponses.length) {
         if (requireEveryClause) {
-          missingOrUnrelated = true;
-          addIssue(state, `Web search has no readable result-page evidence for query: ${clause}.`, "high", true, 0.2);
+          requiredClauseGaps.push(`Web search has no readable result-page evidence for query: ${clause}.`);
         }
         continue;
       }
       matchedClauseResponse = true;
       const clauseTokens = relevanceTokens(clause).slice(0, 10);
-      if (!clauseTokens.length) continue;
+      if (!clauseTokens.length) {
+        matchedRequiredClauses += 1;
+        continue;
+      }
       const clauseEvidenceText = collapseText(clauseResponses.map(responseText).join(" "), 8000).toLowerCase();
       const clauseMatched = clauseTokens.filter((token) => clauseEvidenceText.includes(token));
       if (clauseMatched.length > bestMatched.length) bestMatched = clauseMatched;
@@ -1211,13 +1250,8 @@ function evaluateWebSearchRelevanceVerification(state, task = {}, workerResult =
             : Math.max(3, Math.ceil(clauseTokens.length * 0.35));
       if (clauseMatched.length < clauseRequired) {
         if (requireEveryClause) {
-          missingOrUnrelated = true;
-          addIssue(
-            state,
-            `Web search evidence appears unrelated to query "${clause}". Matched ${clauseMatched.length}/${clauseTokens.length} key tokens (${clauseMatched.slice(0, 6).join(", ") || "none"}).`,
-            "high",
-            true,
-            0.24
+          requiredClauseGaps.push(
+            `Web search evidence appears unrelated to query "${clause}". Matched ${clauseMatched.length}/${clauseTokens.length} key tokens (${clauseMatched.slice(0, 6).join(", ") || "none"}).`
           );
         }
       } else if (!requireEveryClause) {
@@ -1227,7 +1261,23 @@ function evaluateWebSearchRelevanceVerification(state, task = {}, workerResult =
           0.12
         );
         return;
+      } else {
+        matchedRequiredClauses += 1;
       }
+    }
+    if (requireEveryClause && requiredClauseGaps.length) {
+      const partial = matchedRequiredClauses > 0;
+      for (const gap of requiredClauseGaps) {
+        addRequiredEvidenceGap(state, gap, partial ? "medium" : "high", true, partial ? 0.1 : 0.22);
+      }
+      if (partial) {
+        addReason(
+          state,
+          `Web evidence partially covers ${matchedRequiredClauses}/${clauseQueries.length} required search query clauses.`,
+          0.12
+        );
+      }
+      return;
     }
     if (!requireEveryClause) {
       if (matchedClauseResponse && bestMatched.length) {
@@ -1247,7 +1297,6 @@ function evaluateWebSearchRelevanceVerification(state, task = {}, workerResult =
       // The worker used a query string that does not correspond to any declared clause.
       // Fall through to the broader task-query relevance check instead of granting success.
     }
-    if (missingOrUnrelated) return;
     if (requireEveryClause) {
       addReason(state, "Web evidence overlaps each search query clause.", 0.12);
       return;
@@ -1352,7 +1401,7 @@ function evaluateApiVerification(state, task = {}, workerResult = {}, context = 
   }
 }
 
-function evaluateSemanticVerification(state, task = {}, workerResult = {}) {
+function evaluateSemanticVerification(state, task = {}, workerResult = {}, policy = DEFAULT_VERIFICATION_POLICY) {
   const evidence = workerResult.evidence || {};
   const semantic = evidence.semantic || {};
   if (evidence.provided) addReason(state, "Worker returned standardized evidence.", 0.08);
@@ -1394,12 +1443,12 @@ function evaluateSemanticVerification(state, task = {}, workerResult = {}) {
     addReason(state, "Evidence says the result addresses success criteria.", 0.1);
   if (
     Number.isFinite(Number(semantic.criteriaCoverage)) &&
-    Number(semantic.criteriaCoverage) >= DEFAULT_VERIFICATION_POLICY.semantic.minCriteriaCoverage
+    Number(semantic.criteriaCoverage) >= policy.semantic.minCriteriaCoverage
   )
     addReason(state, "Evidence reports high success-criteria coverage.", 0.08);
   if (
     Number.isFinite(Number(semantic.qualityScore)) &&
-    Number(semantic.qualityScore) >= DEFAULT_VERIFICATION_POLICY.semantic.minQualityScore
+    Number(semantic.qualityScore) >= policy.semantic.minQualityScore
   )
     addReason(state, "Evidence reports acceptable semantic quality.", 0.08);
   for (const issue of semantic.qualityIssues || [])
@@ -1484,7 +1533,15 @@ function stripNegatedMutationText(value = "") {
 
 function isReadOnlyLocalEvidenceTask(task = {}, workerResult = {}) {
   const type = String(task.type || task.taskType || "").toLowerCase();
+  const toolWorker = String(task.toolWorker || task.tool_worker || "").toLowerCase();
   const modelPool = String(task.modelPool || task.model_pool || workerResult.context?.model || "").toLowerCase();
+  if (
+    toolWorker === "files" ||
+    /^(local_read|file_read|files_read|filesystem_read|directory_read|project_read|repo_read|repository_read)$/.test(
+      type
+    )
+  )
+    return true;
   if (!(/^(local_execution|shell|terminal|command)$/.test(type) || modelPool === "codex-cli")) return false;
   const text = [
     task.title,
@@ -1509,7 +1566,7 @@ function isReadOnlyEvidenceTask(task = {}, workerResult = {}) {
   return isReadOnlyBrowserTask(task, workerResult) || isReadOnlyLocalEvidenceTask(task, workerResult);
 }
 
-function finalizeVerification(state, task = {}, workerResult = {}, context = {}) {
+function finalizeVerification(state, task = {}, workerResult = {}, context = {}, policy = DEFAULT_VERIFICATION_POLICY) {
   const issueSeverity = maxIssueSeverity(state.detectedIssues);
   const confidence = Math.max(0, Math.min(1, Number(state.confidence.toFixed(2))));
   const fileIntentChecks = Array.isArray(state.fileIntentChecks) ? state.fileIntentChecks.slice(0, 30) : [];
@@ -1526,17 +1583,15 @@ function finalizeVerification(state, task = {}, workerResult = {}, context = {})
       `${task.type || ""} ${task.modelPool || ""}`
     ) || hasTechnicalEvidence(state);
   const seriousIssue = issueSeverity === "high" || issueSeverity === "critical";
+  const requiredEvidenceGap = Array.isArray(state.requiredEvidenceGaps) && state.requiredEvidenceGaps.length > 0;
   const riskBlocked = state.riskFindings.some((finding) => finding.blockedReason || finding.riskLevel === "critical");
 
   let verificationStatus = VERIFICATION_STATUS.UNVERIFIED;
-  if (!state.detectedIssues.length && confidence >= DEFAULT_VERIFICATION_POLICY.confidence.verified)
+  if (!state.detectedIssues.length && confidence >= policy.confidence.verified)
     verificationStatus = VERIFICATION_STATUS.VERIFIED;
   else if (
     !seriousIssue &&
-    confidence >=
-      (technicalTask
-        ? DEFAULT_VERIFICATION_POLICY.confidence.partialTechnical
-        : DEFAULT_VERIFICATION_POLICY.confidence.partialSemantic)
+    confidence >= (technicalTask ? policy.confidence.partialTechnical : policy.confidence.partialSemantic)
   )
     verificationStatus = VERIFICATION_STATUS.PARTIALLY_VERIFIED;
 
@@ -1558,13 +1613,14 @@ function finalizeVerification(state, task = {}, workerResult = {}, context = {})
   } else if (verificationStatus === VERIFICATION_STATUS.VERIFIED) {
     suggestedNextState = SUGGESTED_NEXT_STATE.COMPLETED;
     retryable = false;
-  } else if (verificationStatus === VERIFICATION_STATUS.PARTIALLY_VERIFIED && !technicalTask) {
+  } else if (verificationStatus === VERIFICATION_STATUS.PARTIALLY_VERIFIED && !technicalTask && !requiredEvidenceGap) {
     suggestedNextState = SUGGESTED_NEXT_STATE.COMPLETED;
     retryable = false;
   } else if (
     verificationStatus === VERIFICATION_STATUS.PARTIALLY_VERIFIED &&
     isReadOnlyEvidenceTask(task, workerResult) &&
-    !seriousIssue
+    !seriousIssue &&
+    !requiredEvidenceGap
   ) {
     suggestedNextState = SUGGESTED_NEXT_STATE.COMPLETED;
     retryable = false;
@@ -1665,7 +1721,7 @@ function statusRank(status) {
   return order[status] == null ? 0 : order[status];
 }
 
-function normalizeModelReview(review = {}) {
+function normalizeModelReview(review = {}, policy = DEFAULT_VERIFICATION_POLICY) {
   const status = String(
     review.verificationStatus ||
       review.verification_status ||
@@ -1678,9 +1734,9 @@ function normalizeModelReview(review = {}) {
     verified: Boolean(review.verified),
     verificationStatus: Object.values(VERIFICATION_STATUS).includes(status)
       ? status
-      : confidence >= DEFAULT_VERIFICATION_POLICY.confidence.modelVerified
+      : confidence >= policy.confidence.modelVerified
         ? VERIFICATION_STATUS.VERIFIED
-        : confidence >= DEFAULT_VERIFICATION_POLICY.confidence.modelPartial
+        : confidence >= policy.confidence.modelPartial
           ? VERIFICATION_STATUS.PARTIALLY_VERIFIED
           : VERIFICATION_STATUS.UNVERIFIED,
     confidence,
@@ -1703,11 +1759,27 @@ function normalizeModelReview(review = {}) {
   };
 }
 
-function mergeModelVerification(baseVerification = {}, modelReview = {}) {
+function modelHasBlockingRisk(model = {}) {
+  return (model.riskFindings || []).some((finding) => {
+    const riskLevel = riskEngine.normalizeRiskLevel(finding.riskLevel || "");
+    return Boolean(finding.blockedReason) || riskLevel === "critical";
+  });
+}
+
+function mergeModelVerification(baseVerification = {}, modelReview = {}, policyInput = {}) {
+  const policy = verificationPolicy(policyInput);
   const base = compactVerification(baseVerification);
-  const model = normalizeModelReview(modelReview);
+  const model = normalizeModelReview(modelReview, policy);
   const hardTechnicalIssue = hasHardTechnicalIssue(base);
+  const baseAlreadyBlocked = base.suggestedNextState === SUGGESTED_NEXT_STATE.BLOCKED || base.riskFindings.length > 0;
+  const modelBlockingRisk = modelHasBlockingRisk(model);
+  const modelBlockDowngraded = model.suggestedNextState === SUGGESTED_NEXT_STATE.BLOCKED && !modelBlockingRisk;
   const modelReasons = model.reasons.map((reason) => `Verifier model: ${reason}`);
+  if (modelBlockDowngraded) {
+    modelReasons.push(
+      "Verifier model: blocked recommendation normalized to needs_evidence because no safety, approval, budget, or critical risk finding was present."
+    );
+  }
   const modelIssues = model.detectedIssues.map((issue) => ({
     issue: `Verifier model: ${collapseText(issue.issue || issue)}`,
     severity: issue.severity || "medium",
@@ -1723,9 +1795,10 @@ function mergeModelVerification(baseVerification = {}, modelReview = {}) {
   const chosenConfidence = canUpgrade
     ? Math.max(base.confidence, model.confidence || 0)
     : Math.min(base.confidence, model.confidence || base.confidence);
-  const modelNext = model.suggestedNextState;
-  const suggestedNextState =
-    canUpgrade && modelNext
+  const modelNext = modelBlockDowngraded ? SUGGESTED_NEXT_STATE.NEEDS_EVIDENCE : model.suggestedNextState;
+  const suggestedNextState = baseAlreadyBlocked
+    ? base.suggestedNextState
+    : canUpgrade && modelNext
       ? modelNext
       : !canUpgrade &&
           [
@@ -1750,7 +1823,7 @@ function mergeModelVerification(baseVerification = {}, modelReview = {}) {
     missingEvidence: [...base.missingEvidence, ...model.missingEvidence].slice(0, 30),
     rejectedEvidence: [...base.rejectedEvidence, ...model.rejectedEvidence].slice(0, 30),
     suggestedNextState,
-    retryable: model.retryable !== false && base.retryable !== false,
+    retryable: (modelBlockDowngraded || model.retryable !== false) && base.retryable !== false,
     riskFindings: [...base.riskFindings, ...model.riskFindings].slice(0, 20),
     generatedMemoryCandidates: base.generatedMemoryCandidates
   };
@@ -1789,11 +1862,13 @@ function maxIssueSeverity(issues = []) {
 
 function verifyTaskResult(task = {}, rawWorkerResult = {}, context = {}) {
   const workerResult = normalizeWorkerResult(rawWorkerResult);
+  const policy = verificationPolicy(context);
   const state = {
-    confidence: DEFAULT_VERIFICATION_POLICY.confidence.defaultCompact,
+    confidence: policy.confidence.defaultCompact,
     reasons: [],
     detectedIssues: [],
     riskFindings: [],
+    requiredEvidenceGaps: [],
     fileIntentChecks: [],
     falseFileDetectionCount: 0
   };
@@ -1803,14 +1878,20 @@ function verifyTaskResult(task = {}, rawWorkerResult = {}, context = {}) {
   evaluateShellVerification(state, task, workerResult, context);
   evaluateApiVerification(state, task, workerResult, context);
   evaluateWebSearchRelevanceVerification(state, task, workerResult, context);
-  evaluateSemanticVerification(state, task, workerResult, context);
+  evaluateSemanticVerification(state, task, workerResult, policy);
   evaluateAuthenticityVerification(state, task, workerResult, context);
 
-  return finalizeVerification(state, task, workerResult, {
-    ...context,
-    attempts: Number(context.attempts || task.attempts || 0),
-    maxAttempts: Number(context.maxAttempts || task.maxAttempts || 1)
-  });
+  return finalizeVerification(
+    state,
+    task,
+    workerResult,
+    {
+      ...context,
+      attempts: Number(context.attempts || task.attempts || 0),
+      maxAttempts: Number(context.maxAttempts || task.maxAttempts || 1)
+    },
+    policy
+  );
 }
 
 function compactVerification(verification = {}) {
@@ -1872,5 +1953,6 @@ module.exports = {
   compactVerification,
   mergeModelVerification,
   shouldUseVerifierModel,
+  verificationPolicy,
   verifyTaskResult
 };

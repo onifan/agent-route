@@ -4,23 +4,16 @@ const fs = require("fs");
 const { agentRoutePath } = require("../../shared/utils/agent-home");
 const { corsHeaders } = require("../../security/cors");
 const { checkRequestAuth } = require("../../security/request-auth");
+const modelApiSettings = require("../model-api-settings");
 
 let localApiKeyCache = { expiresAt: 0, key: "" };
 let providerDbCache = {
   expiresAt: 0,
   dbPath: "",
-  snapshot: { settings: {}, connections: [], providerNodes: [], modelAliases: {} }
+  snapshot: { settings: {} }
 };
 
 const OPENAI_COMPAT_PROVIDER_TARGETS = {
-  openrouter: {
-    url: "https://openrouter.ai/api/v1/chat/completions",
-    modelPrefix: "openrouter/",
-    headers: () => ({
-      "HTTP-Referer": envValue("AGENT_ROUTE_PUBLIC_URL") || "http://localhost:20128",
-      "X-Title": "AgentRoute Studio"
-    })
-  },
   openai: {
     url: "https://api.openai.com/v1/chat/completions",
     modelPrefix: "openai/"
@@ -29,9 +22,17 @@ const OPENAI_COMPAT_PROVIDER_TARGETS = {
     url: "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
     modelPrefixes: ["gemini/", "gc/"]
   },
+  grok: {
+    url: "https://api.x.ai/v1/chat/completions",
+    modelPrefixes: ["grok/", "xai/"]
+  },
   deepseek: {
-    url: "https://api.deepseek.com/v1/chat/completions",
+    url: "https://api.deepseek.com/chat/completions",
     modelPrefix: "deepseek/"
+  },
+  qwen: {
+    url: "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
+    modelPrefixes: ["qwen/", "qw/"]
   },
   kimi: {
     url: "https://api.moonshot.cn/v1/chat/completions",
@@ -52,11 +53,13 @@ const OPENAI_COMPAT_PROVIDER_TARGETS = {
 };
 
 const PROVIDER_ALIASES = {
-  codex: ["codex"],
-  openrouter: ["openrouter"],
   openai: ["openai"],
+  claude: ["claude", "anthropic"],
+  anthropic: ["anthropic", "claude"],
   gemini: ["gemini"],
+  grok: ["grok", "xai", "x-ai"],
   deepseek: ["deepseek"],
+  qwen: ["qwen", "dashscope"],
   kimi: ["kimi", "moonshot"],
   moonshot: ["moonshot", "kimi"],
   glm: ["glm", "zhipu", "bigmodel"],
@@ -93,28 +96,6 @@ function safeJsonObject(value) {
   }
 }
 
-function safeJsonValue(value, fallback = "") {
-  try {
-    return JSON.parse(String(value || "null")) || fallback;
-  } catch {
-    return fallback;
-  }
-}
-
-function normalizeOAuthData(value = {}) {
-  const input = value && typeof value === "object" && !Array.isArray(value) ? value : {};
-  return {
-    accessToken: String(input.accessToken || input.access_token || "").trim(),
-    refreshToken: String(input.refreshToken || input.refresh_token || "").trim(),
-    idToken: String(input.idToken || input.id_token || "").trim(),
-    tokenType: String(input.tokenType || input.token_type || "Bearer").trim() || "Bearer",
-    scope: String(input.scope || "").trim(),
-    expiresAt: String(input.expiresAt || input.expires_at || "").trim(),
-    providerAuthMethod: String(input.providerAuthMethod || input.provider_auth_method || "").trim(),
-    machineId: String(input.machineId || input.machine_id || "").trim()
-  };
-}
-
 function getLocalApiKey() {
   const now = Date.now();
   if (localApiKeyCache.expiresAt > now) return localApiKeyCache.key;
@@ -147,7 +128,7 @@ function readProviderDbSnapshot() {
   const dbPath = dataDbPath();
   if (providerDbCache.expiresAt > now && providerDbCache.dbPath === dbPath) return providerDbCache.snapshot;
 
-  const snapshot = { settings: {}, connections: [], providerNodes: [], modelAliases: {} };
+  const snapshot = { settings: {} };
   try {
     if (!fs.existsSync(dbPath)) {
       providerDbCache = { expiresAt: now + 10 * 1000, dbPath, snapshot };
@@ -159,65 +140,9 @@ function readProviderDbSnapshot() {
       const row = db.prepare("SELECT data FROM settings WHERE id = 1").get();
       snapshot.settings = safeJsonObject(row && row.data);
     } catch {}
-    try {
-      const rows = db
-        .prepare(
-          [
-            "SELECT id, provider, authType, name, priority, isActive, data, createdAt, updatedAt",
-            "FROM providerConnections",
-            "WHERE isActive = 1",
-            "ORDER BY COALESCE(priority, 9999) ASC, createdAt DESC"
-          ].join(" ")
-        )
-        .all();
-      snapshot.connections = rows
-        .map((row) => {
-          const data = safeJsonObject(row.data);
-          return {
-            id: String(row.id || ""),
-            provider: String(row.provider || "").toLowerCase(),
-            authType: String(row.authType || "").toLowerCase(),
-            name: String(row.name || ""),
-            priority: Number(row.priority || 9999),
-            data,
-            apiKey: String(data.apiKey || ""),
-            oauth: normalizeOAuthData(data.oauth),
-            testStatus: String(data.testStatus || "").toLowerCase(),
-            providerSpecificData:
-              data.providerSpecificData && typeof data.providerSpecificData === "object"
-                ? data.providerSpecificData
-                : {}
-          };
-        })
-        .filter((connection) => connection.provider);
-    } catch {}
-    try {
-      const rows = db.prepare("SELECT id, type, name, data, createdAt, updatedAt FROM providerNodes").all();
-      snapshot.providerNodes = rows
-        .map((row) => {
-          const data = safeJsonObject(row.data);
-          return {
-            id: String(row.id || "").toLowerCase(),
-            type: String(row.type || data.type || "openai-compatible"),
-            name: String(row.name || ""),
-            prefix: String(data.prefix || row.id || "").toLowerCase(),
-            baseUrl: String(data.baseUrl || data.base_url || ""),
-            apiType: String(data.apiType || data.api_type || "chat")
-          };
-        })
-        .filter((node) => node.id && node.baseUrl);
-    } catch {}
-    try {
-      const rows = db.prepare("SELECT key, value FROM kv WHERE scope = 'modelAliases'").all();
-      snapshot.modelAliases = Object.fromEntries(
-        rows
-          .map((row) => [String(row.key || "").trim(), safeJsonValue(row.value, "")])
-          .filter(([key, value]) => key && value)
-      );
-    } catch {}
     db.close();
   } catch (err) {
-    console.warn("[core-router] failed to read provider database:", err.message);
+    console.warn("[core-router] failed to read router settings:", err.message);
   }
   providerDbCache = { expiresAt: now + 30 * 1000, dbPath, snapshot };
   return snapshot;
@@ -227,7 +152,7 @@ function clearProviderDbCache() {
   providerDbCache = {
     expiresAt: 0,
     dbPath: "",
-    snapshot: { settings: {}, connections: [], providerNodes: [], modelAliases: {} }
+    snapshot: { settings: {} }
   };
   localApiKeyCache = { expiresAt: 0, key: "" };
 }
@@ -247,269 +172,17 @@ function normalizeProxyUrl(value = "") {
   return `http://${proxy}`;
 }
 
-function bearerHeaders(apiKey) {
-  return apiKey ? { Authorization: `Bearer ${apiKey}` } : {};
-}
-
-function stripModelPrefix(model, prefix) {
-  const text = String(model || "").trim();
-  return text.toLowerCase().startsWith(prefix) ? text.slice(prefix.length) : text;
-}
-
-function modelProviderKey(model) {
-  const lower = String(model || "")
-    .trim()
-    .toLowerCase();
-  if (!lower.includes("/")) return "";
-  const prefix = lower.split("/")[0];
-  if (prefix === "cx") return "codex";
-  if (prefix === "gc") return "gemini";
-  if (prefix === "kimi") return "kimi";
-  if (prefix === "zhipu" || prefix === "bigmodel") return "glm";
-  return prefix;
-}
-
-function stripProviderModelPrefix(model, target) {
-  const prefixes = target.modelPrefixes || [target.modelPrefix].filter(Boolean);
-  const prefix = prefixes.find((item) =>
-    String(model || "")
-      .trim()
-      .toLowerCase()
-      .startsWith(item)
-  );
-  return prefix ? stripModelPrefix(model, prefix) : String(model || "").trim();
-}
-
-function activeApiKeyConnections(provider, extraAliases = []) {
-  const aliases = new Set([...(PROVIDER_ALIASES[provider] || [provider]), ...extraAliases].filter(Boolean));
-  return readProviderDbSnapshot()
-    .connections.filter(
-      (connection) => aliases.has(connection.provider) && connection.authType === "apikey" && connection.apiKey
-    )
-    .sort((a, b) => {
-      const activeA = a.testStatus === "active" ? 0 : 1;
-      const activeB = b.testStatus === "active" ? 0 : 1;
-      return activeA - activeB || a.priority - b.priority;
-    });
-}
-
-function activeOAuthConnections(provider, extraAliases = []) {
-  const aliases = new Set([...(PROVIDER_ALIASES[provider] || [provider]), ...extraAliases].filter(Boolean));
-  return readProviderDbSnapshot()
-    .connections.filter((connection) => {
-      const oauth = connection.oauth || {};
-      return (
-        aliases.has(connection.provider) && connection.authType === "oauth" && String(oauth.accessToken || "").trim()
-      );
-    })
-    .sort((a, b) => {
-      const activeA = a.testStatus === "active" ? 0 : 1;
-      const activeB = b.testStatus === "active" ? 0 : 1;
-      return activeA - activeB || a.priority - b.priority;
-    });
-}
-
-function targetForProviderConnection(model, provider, target, connection) {
-  const providerSpecificData = connection.providerSpecificData || {};
-  const baseUrl = String(
-    providerSpecificData.baseUrl || providerSpecificData.baseURL || providerSpecificData.apiBase || ""
-  ).trim();
-  const normalizedBaseUrl = baseUrl.replace(/\/+$/g, "");
-  const url = normalizedBaseUrl
-    ? normalizedBaseUrl.endsWith("/chat/completions")
-      ? normalizedBaseUrl
-      : `${normalizedBaseUrl}/chat/completions`
-    : target.url;
-  const extraHeaders = typeof target.headers === "function" ? target.headers(connection) : {};
-  return {
-    url,
-    model: stripProviderModelPrefix(model, target),
-    headers: {
-      ...bearerHeaders(connection.apiKey),
-      ...extraHeaders
-    },
-    proxy: {
-      enabled: Boolean(providerSpecificData.connectionProxyEnabled),
-      url: String(providerSpecificData.connectionProxyUrl || ""),
-      noProxy: String(providerSpecificData.connectionNoProxy || "")
-    },
-    provider,
-    connectionId: connection.id || "",
-    connectionName: connection.name || ""
-  };
-}
-
-function stripCodexModelPrefix(model) {
-  const text = String(model || "").trim();
-  if (/^cx\//i.test(text)) return text.slice(3);
-  if (/^codex\//i.test(text)) return text.slice(6);
-  return text;
-}
-
-function endpointUrl(baseUrl, suffix) {
-  const normalized = String(baseUrl || "")
-    .trim()
-    .replace(/\/+$/g, "");
-  if (!normalized) return "";
-  if (normalized.endsWith("/chat/completions") || normalized.endsWith("/responses")) return normalized;
-  return `${normalized}/${suffix}`;
-}
-
-function codexOAuthEndpoint(connection, endpointMode) {
-  const providerSpecificData = connection.providerSpecificData || {};
-  const explicitEndpoint =
-    endpointMode === "responses"
-      ? envValue("AGENT_ROUTE_CODEX_OAUTH_RESPONSES_URL")
-      : envValue("AGENT_ROUTE_CODEX_OAUTH_CHAT_URL");
-  if (explicitEndpoint) {
-    const url = endpointUrl(explicitEndpoint, endpointMode === "responses" ? "responses" : "chat/completions");
-    return {
-      url,
-      wireMode: url.endsWith("/responses") ? "responses" : "chat"
-    };
-  }
-  const baseUrl = String(
-    providerSpecificData.baseUrl ||
-      providerSpecificData.baseURL ||
-      providerSpecificData.apiBase ||
-      envValue("AGENT_ROUTE_CODEX_OAUTH_BASE_URL") ||
-      ""
-  ).trim();
-  if (baseUrl) {
-    const url = endpointUrl(baseUrl, endpointMode === "responses" ? "responses" : "chat/completions");
-    return {
-      url,
-      wireMode: url.endsWith("/responses") ? "responses" : "chat"
-    };
-  }
-  return {
-    url: "",
-    wireMode: ""
-  };
-}
-
-function targetForCodexOAuthConnection(model, connection, endpointMode) {
-  const endpoint = codexOAuthEndpoint(connection, endpointMode);
-  if (!endpoint.url) return null;
-  const oauth = connection.oauth || {};
-  const tokenType = String(oauth.tokenType || "Bearer").trim() || "Bearer";
-  const providerSpecificData = connection.providerSpecificData || {};
-  const accountId = String(
-    providerSpecificData.accountId || providerSpecificData.account_id || connection.data?.accountId || ""
-  ).trim();
-  return {
-    kind: "codex-oauth",
-    url: endpoint.url,
-    wireMode: endpoint.wireMode,
-    model: stripCodexModelPrefix(model),
-    headers: {
-      Authorization: `${tokenType} ${oauth.accessToken}`,
-      ...(accountId ? { "ChatGPT-Account-Id": accountId } : {})
-    },
-    proxy: {
-      enabled: Boolean(providerSpecificData.connectionProxyEnabled),
-      url: String(providerSpecificData.connectionProxyUrl || ""),
-      noProxy: String(providerSpecificData.connectionNoProxy || "")
-    },
-    provider: "codex",
-    connectionId: connection.id || "",
-    connectionName: connection.name || ""
-  };
-}
-
-function targetsFromCodexOAuthProvider(model, endpointMode) {
-  if (!/^(cx|codex)\//i.test(String(model || ""))) return [];
-  return activeOAuthConnections("codex")
-    .map((connection) => targetForCodexOAuthConnection(model, connection, endpointMode))
-    .filter(Boolean);
-}
-
 function targetsFromConfiguredProvider(model) {
-  const provider = modelProviderKey(model);
-  if (!provider) return [];
-  const snapshot = readProviderDbSnapshot();
-  const customNode = snapshot.providerNodes.find((node) => node.id === provider || node.prefix === provider);
-  const customBaseUrl = customNode ? customNode.baseUrl.replace(/\/+$/g, "") : "";
-  const target =
-    OPENAI_COMPAT_PROVIDER_TARGETS[provider] ||
-    (customNode && customNode.type === "openai-compatible"
-      ? {
-          url: customBaseUrl.endsWith("/chat/completions") ? customBaseUrl : `${customBaseUrl}/chat/completions`,
-          modelPrefixes: [`${customNode.prefix || customNode.id}/`, `${customNode.id}/`]
-        }
-      : null);
-  if (!target) return [];
-  const connectionAliases = customNode ? [customNode.id, customNode.prefix] : [];
-  return activeApiKeyConnections(provider, connectionAliases).map((connection) =>
-    targetForProviderConnection(model, provider, target, connection)
-  );
+  const target = modelApiSettings.targetForModelApi(model);
+  return target ? [target] : [];
 }
 
 function resolveModelAlias(model) {
-  let current = String(model || "").trim();
-  if (!current) return "";
-  const seen = new Set();
-  for (let index = 0; index < 8; index += 1) {
-    const aliases = readProviderDbSnapshot().modelAliases || {};
-    const lower = current.toLowerCase();
-    const next = String(aliases[current] || aliases[lower] || "").trim();
-    if (!next || next === current || seen.has(next)) return current;
-    seen.add(current);
-    current = next;
-  }
-  return current;
-}
-
-function uniqueModelProxyTargets(targets = []) {
-  const seen = new Set();
-  return targets.filter((target) => {
-    if (!target) return false;
-    const key = [
-      target.kind || "",
-      target.url || "",
-      target.model || "",
-      target.connectionId || "",
-      (target.headers && target.headers.Authorization) || ""
-    ].join("\n");
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
-}
-
-function providerEnvTargetWithConfiguredTargets(envTarget, model) {
-  return uniqueModelProxyTargets([envTarget, ...targetsFromConfiguredProvider(model)]);
+  return modelApiSettings.resolveModelAlias(model);
 }
 
 function configuredProviderDiagnostic(model) {
-  if (!model) return "";
-  const provider = modelProviderKey(model);
-  if (!provider) return "The model id does not include a provider prefix.";
-  const aliases = new Set(PROVIDER_ALIASES[provider] || [provider]);
-  const connections = readProviderDbSnapshot().connections.filter((connection) => aliases.has(connection.provider));
-  if (!connections.length) return `No active provider connection was found for '${provider}'.`;
-  if (provider === "codex") {
-    if (!connections.some((connection) => connection.authType === "oauth" && connection.oauth?.accessToken)) {
-      const authTypes =
-        [...new Set(connections.map((connection) => connection.authType).filter(Boolean))].join(", ") || "unknown";
-      return `Provider 'codex' is configured, but no active Codex OAuth connection with an access token is available. Auth types: ${authTypes}.`;
-    }
-    return [
-      "Provider 'codex' has active OAuth accounts, but no explicit Codex OAuth model route is configured.",
-      "Configure AGENT_ROUTE_CODEX_OAUTH_BASE_URL / AGENT_ROUTE_CODEX_OAUTH_CHAT_URL, or set a per-connection Base URL."
-    ].join(" ");
-  }
-  if (!OPENAI_COMPAT_PROVIDER_TARGETS[provider]) {
-    const authTypes =
-      [...new Set(connections.map((connection) => connection.authType).filter(Boolean))].join(", ") || "unknown";
-    return `Provider '${provider}' is configured with ${authTypes} auth, but the internal model service only supports OpenAI-compatible API-key providers for this provider.`;
-  }
-  if (!connections.some((connection) => connection.authType === "apikey" && connection.apiKey)) {
-    const authTypes =
-      [...new Set(connections.map((connection) => connection.authType).filter(Boolean))].join(", ") || "unknown";
-    return `Provider '${provider}' is configured, but no active API-key connection is available for internal OpenAI-compatible model calls. Auth types: ${authTypes}.`;
-  }
-  return `Provider '${provider}' is configured, but no usable route could be built for this request.`;
+  return modelApiSettings.modelApiDiagnostic(model);
 }
 
 function hostnameFromUrl(url) {
@@ -595,16 +268,6 @@ function messageContentToText(content) {
   return String(content);
 }
 
-function responsesInputFromChatMessages(messages = []) {
-  return (Array.isArray(messages) ? messages : [])
-    .filter((message) => String((message && message.role) || "").toLowerCase() !== "system")
-    .map((message) => ({
-      role: String((message && message.role) || "user").toLowerCase() === "assistant" ? "assistant" : "user",
-      content: messageContentToText(message && message.content)
-    }))
-    .filter((message) => message.content);
-}
-
 function systemInstructionsFromChatMessages(messages = []) {
   return (Array.isArray(messages) ? messages : [])
     .filter((message) => String((message && message.role) || "").toLowerCase() === "system")
@@ -613,84 +276,140 @@ function systemInstructionsFromChatMessages(messages = []) {
     .join("\n\n");
 }
 
-function requestBodyForTarget(target, body = {}) {
-  if (target && target.kind === "codex-oauth" && target.wireMode === "responses") {
-    const maxOutputTokens = body.max_output_tokens || body.max_completion_tokens || body.max_tokens;
-    return {
-      model: target.model,
-      input: responsesInputFromChatMessages(body.messages),
-      instructions: systemInstructionsFromChatMessages(body.messages) || undefined,
-      temperature: body.temperature,
-      top_p: body.top_p,
-      max_output_tokens: maxOutputTokens,
-      stream: false
-    };
+function anthropicMessagesFromChatMessages(messages = []) {
+  const output = [];
+  for (const message of Array.isArray(messages) ? messages : []) {
+    const role = String((message && message.role) || "user").toLowerCase();
+    if (role === "system") continue;
+    const content = messageContentToText(message && message.content);
+    if (!content) continue;
+    output.push({
+      role: role === "assistant" ? "assistant" : "user",
+      content
+    });
   }
+  return output.length ? output : [{ role: "user", content: "" }];
+}
+
+function anthropicToolsFromOpenAiTools(tools = []) {
+  return (Array.isArray(tools) ? tools : [])
+    .filter((tool) => tool && tool.type === "function" && tool.function && tool.function.name)
+    .map((tool) => ({
+      name: String(tool.function.name),
+      description: String(tool.function.description || ""),
+      input_schema:
+        tool.function.parameters && typeof tool.function.parameters === "object"
+          ? tool.function.parameters
+          : { type: "object", properties: {} }
+    }));
+}
+
+function anthropicToolChoiceFromOpenAiChoice(toolChoice) {
+  if (!toolChoice || toolChoice === "auto") return undefined;
+  if (toolChoice === "none") return { type: "none" };
+  if (toolChoice === "required") return { type: "any" };
+  const name = toolChoice && toolChoice.function && toolChoice.function.name;
+  return name ? { type: "tool", name: String(name) } : undefined;
+}
+
+function requestBodyForAnthropicTarget(target, body = {}) {
+  const maxTokens = body.max_tokens || body.max_completion_tokens || body.max_output_tokens || 4096;
+  const tools = anthropicToolsFromOpenAiTools(body.tools);
+  const requestBody = {
+    model: target.model,
+    messages: anthropicMessagesFromChatMessages(body.messages),
+    system: systemInstructionsFromChatMessages(body.messages) || undefined,
+    max_tokens: maxTokens,
+    temperature: body.temperature,
+    top_p: body.top_p,
+    stream: false
+  };
+  if (tools.length) requestBody.tools = tools;
+  const toolChoice = anthropicToolChoiceFromOpenAiChoice(body.tool_choice);
+  if (toolChoice) requestBody.tool_choice = toolChoice;
+  return Object.fromEntries(Object.entries(requestBody).filter(([, value]) => value !== undefined));
+}
+
+function requestBodyForTarget(target, body = {}) {
+  if (target && target.kind === "anthropic") return requestBodyForAnthropicTarget(target, body);
   return { ...body, model: target.model };
 }
 
-function extractResponsesOutputText(data) {
-  if (!data || typeof data !== "object") return "";
-  if (typeof data.output_text === "string") return data.output_text;
-  if (Array.isArray(data.output)) {
-    return data.output
-      .flatMap((item) => (Array.isArray(item && item.content) ? item.content : []))
-      .map((part) => {
-        if (!part || typeof part !== "object") return "";
-        if (typeof part.text === "string") return part.text;
-        if (typeof part.content === "string") return part.content;
-        return "";
-      })
-      .filter(Boolean)
-      .join("\n");
-  }
-  return "";
+function anthropicStopReason(reason = "") {
+  const value = String(reason || "");
+  if (value === "max_tokens") return "length";
+  if (value === "tool_use") return "tool_calls";
+  if (value === "end_turn" || value === "stop_sequence") return "stop";
+  return value || "stop";
 }
 
-function openAiChatCompletionFromText({ model, content, promptTokens = 0, completionTokens = 0 }) {
+function openAiChatCompletionFromAnthropic(data = {}, requestedModel = "") {
   const created = Math.floor(Date.now() / 1000);
+  const content = Array.isArray(data.content) ? data.content : [];
+  const text = content
+    .filter((part) => part && part.type === "text")
+    .map((part) => part.text || "")
+    .filter(Boolean)
+    .join("\n");
+  const toolCalls = content
+    .filter((part) => part && part.type === "tool_use" && part.name)
+    .map((part, index) => ({
+      id: part.id || `call_${cryptoRandomId(index)}`,
+      type: "function",
+      function: {
+        name: String(part.name),
+        arguments: JSON.stringify(part.input || {})
+      }
+    }));
+  const message = {
+    role: "assistant",
+    content: text || null
+  };
+  if (toolCalls.length) message.tool_calls = toolCalls;
+  const inputTokens = Number(data.usage?.input_tokens || 0);
+  const outputTokens = Number(data.usage?.output_tokens || 0);
   return {
-    id: `chatcmpl-codex-oauth-${created}`,
+    id: data.id || `chatcmpl-anthropic-${created}`,
     object: "chat.completion",
     created,
-    model,
+    model: requestedModel || data.model || "",
     choices: [
       {
         index: 0,
-        message: {
-          role: "assistant",
-          content: String(content || "")
-        },
-        finish_reason: "stop"
+        message,
+        finish_reason: anthropicStopReason(data.stop_reason)
       }
     ],
     usage: {
-      prompt_tokens: promptTokens,
-      completion_tokens: completionTokens,
-      total_tokens: promptTokens + completionTokens
+      prompt_tokens: inputTokens,
+      completion_tokens: outputTokens,
+      total_tokens: inputTokens + outputTokens
     }
   };
 }
 
-function estimateTokens(text = "") {
-  return Math.max(1, Math.ceil(String(text || "").length / 4));
+function cryptoRandomId(index = 0) {
+  try {
+    return require("crypto").randomUUID().replace(/-/g, "");
+  } catch {
+    return `${Date.now()}_${index}`;
+  }
 }
 
 async function responseForSuccessfulUpstream(upstream, target, originalBody, endpointMode, requestOrOrigin) {
-  if (target && target.kind === "codex-oauth" && target.wireMode === "responses" && endpointMode === "chat") {
+  if (target && target.kind === "anthropic" && endpointMode === "chat") {
     const text = await upstream.text();
     let data = null;
     try {
       data = JSON.parse(text);
     } catch {}
-    const content = extractResponsesOutputText(data);
-    if (!content) {
+    if (!data || typeof data !== "object") {
       return jsonResponse(
         {
           error: {
-            message: "Codex OAuth provider returned a Responses payload without assistant text.",
+            message: "Claude model API returned a non-JSON response.",
             type: "model_proxy_error",
-            code: "model_proxy_empty_response"
+            code: "model_proxy_invalid_response"
           }
         },
         502,
@@ -699,14 +418,7 @@ async function responseForSuccessfulUpstream(upstream, target, originalBody, end
       );
     }
     return jsonResponse(
-      openAiChatCompletionFromText({
-        model: (originalBody && originalBody.model) || target.model,
-        content,
-        promptTokens: estimateTokens(
-          JSON.stringify(originalBody && originalBody.messages ? originalBody.messages : [])
-        ),
-        completionTokens: estimateTokens(content)
-      }),
+      openAiChatCompletionFromAnthropic(data, (originalBody && originalBody.model) || target.model),
       200,
       {},
       requestOrOrigin
@@ -732,94 +444,9 @@ function inferEndpointMode(req, options = {}) {
   return requestPathname(req).includes("/responses") ? "responses" : "chat";
 }
 
-function isAgentRouteRunUrl(url) {
-  try {
-    const parsed = new URL(url, "http://localhost");
-    return parsed.pathname === "/api/agent-route/run";
-  } catch {
-    return false;
-  }
-}
-
 function modelProxyTargets(body, endpointMode) {
   const model = resolveModelAlias(body && body.model);
-  const lower = model.toLowerCase();
-  if (/^(cx|codex)\//i.test(model)) return targetsFromCodexOAuthProvider(model, endpointMode);
-  const genericUrl =
-    endpointMode === "responses"
-      ? envValue("AGENT_ROUTE_UPSTREAM_RESPONSES_URL")
-      : envValue("AGENT_ROUTE_UPSTREAM_CHAT_URL", "AGENT_ROUTE_MODEL_PROXY_URL");
-  if (genericUrl) {
-    if (isAgentRouteRunUrl(genericUrl)) return [];
-    return [
-      {
-        url: genericUrl,
-        model,
-        headers: bearerHeaders(envValue("AGENT_ROUTE_UPSTREAM_API_KEY"))
-      }
-    ];
-  }
   if (endpointMode !== "chat") return [];
-  if (lower.startsWith("openrouter/")) {
-    const apiKey = envValue("OPENROUTER_API_KEY");
-    if (!apiKey) return targetsFromConfiguredProvider(model);
-    return providerEnvTargetWithConfiguredTargets(
-      {
-        url: "https://openrouter.ai/api/v1/chat/completions",
-        model: stripModelPrefix(model, "openrouter/"),
-        headers: {
-          ...bearerHeaders(apiKey),
-          "HTTP-Referer": envValue("AGENT_ROUTE_PUBLIC_URL") || "http://localhost:20128",
-          "X-Title": "AgentRoute Studio"
-        },
-        provider: "openrouter",
-        connectionId: "env"
-      },
-      model
-    );
-  }
-  if (lower.startsWith("openai/")) {
-    const apiKey = envValue("OPENAI_API_KEY");
-    if (!apiKey) return targetsFromConfiguredProvider(model);
-    return providerEnvTargetWithConfiguredTargets(
-      {
-        url: envValue("OPENAI_CHAT_COMPLETIONS_URL") || "https://api.openai.com/v1/chat/completions",
-        model: stripModelPrefix(model, "openai/"),
-        headers: bearerHeaders(apiKey),
-        provider: "openai",
-        connectionId: "env"
-      },
-      model
-    );
-  }
-  if (lower.startsWith("gemini/") || lower.startsWith("gc/")) {
-    const apiKey = envValue("GEMINI_API_KEY", "GOOGLE_API_KEY");
-    if (!apiKey) return targetsFromConfiguredProvider(model);
-    return providerEnvTargetWithConfiguredTargets(
-      {
-        url:
-          envValue("GEMINI_OPENAI_CHAT_URL") ||
-          "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
-        model: lower.startsWith("gc/") ? stripModelPrefix(model, "gc/") : stripModelPrefix(model, "gemini/"),
-        headers: bearerHeaders(apiKey),
-        provider: "gemini",
-        connectionId: "env"
-      },
-      model
-    );
-  }
-  if (lower.startsWith("oc/")) {
-    const url = envValue("OC_CHAT_COMPLETIONS_URL", "AGENT_ROUTE_OC_CHAT_URL");
-    const apiKey = envValue("OC_API_KEY", "AGENT_ROUTE_OC_API_KEY");
-    if (!url || !apiKey) return [];
-    return [
-      {
-        url,
-        model: stripModelPrefix(model, "oc/"),
-        headers: bearerHeaders(apiKey)
-      }
-    ];
-  }
   return targetsFromConfiguredProvider(model);
 }
 
@@ -940,10 +567,10 @@ function unconfiguredModelProxyResponse(model, endpointMode, requestOrOrigin = n
             : `No upstream model route is configured for ${model || "(missing model)"}.`,
           diagnostic,
           endpointMode === "responses"
-            ? "Configure AGENT_ROUTE_UPSTREAM_RESPONSES_URL, or use the goal-driven agent endpoint with a chat-compatible model pool."
+            ? "Responses-compatible model proxying is disabled. Use the goal-driven agent endpoint with a chat-compatible model API entry."
             : internal
-              ? "Configure AGENT_ROUTE_UPSTREAM_CHAT_URL, or add an active provider connection for the agent's internal model service."
-              : "Configure AGENT_ROUTE_UPSTREAM_CHAT_URL/AGENT_ROUTE_MODEL_PROXY_URL, or add an active OpenAI-compatible provider connection."
+              ? "Configure an active model API entry in AgentRoute model API settings."
+              : "Configure an active model API entry in AgentRoute model API settings."
         ]
           .filter(Boolean)
           .join(" "),
@@ -986,23 +613,21 @@ async function handleModelProxy(req, options = {}) {
   if (!targets.length) return unconfiguredModelProxyResponse(body && body.model, endpointMode, req, internalOptions);
   const target = targets[0];
 
-  if (target.kind === "codex-oauth" && body.stream) {
-    if (body.stream) {
-      return jsonResponse(
-        {
-          error: {
-            message: internalModelMode(internalOptions)
-              ? "Codex OAuth internal model request does not support streaming responses."
-              : "Codex OAuth model request does not support streaming responses.",
-            type: "model_proxy_error",
-            code: "model_proxy_stream_unsupported"
-          }
-        },
-        400,
-        {},
-        req
-      );
-    }
+  if (target.kind === "anthropic" && body.stream) {
+    return jsonResponse(
+      {
+        error: {
+          message: internalModelMode(internalOptions)
+            ? "Claude internal model API requests are translated through the Messages API and do not support streaming here."
+            : "Claude model API requests are translated through the Messages API and do not support streaming here.",
+          type: "model_proxy_error",
+          code: "model_proxy_stream_unsupported"
+        }
+      },
+      400,
+      {},
+      req
+    );
   }
 
   const attempts = [];
@@ -1015,10 +640,6 @@ async function handleModelProxy(req, options = {}) {
       "Content-Type": "application/json",
       ...currentTarget.headers
     };
-    if (envValue("AGENT_ROUTE_UPSTREAM_FORWARD_AUTH") === "true") {
-      const authorization = req.headers.get("authorization");
-      if (authorization && !headers.Authorization) headers.Authorization = authorization;
-    }
     const controller = new AbortController();
     const abortFromRequest = () => controller.abort(req.signal && req.signal.reason);
     if (req.signal) {

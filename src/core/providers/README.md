@@ -1,5 +1,5 @@
-# Providers
+# Legacy Providers
 
-负责不同模型提供商接入和请求封装。
+旧 provider / OAuth 管理功能已移除，运行时不再读取这里的连接配置。
 
-不负责模型选择策略、任务执行、风险判断或 agent 编排。provider 只暴露稳定的调用能力。
+新的模型接入入口是控制台的 **模型 API** 页面，以及 `src/core/model-api-settings.js`。

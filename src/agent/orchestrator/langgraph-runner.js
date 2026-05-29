@@ -2,6 +2,19 @@
 
 const { Annotation, END, START, StateGraph } = require("@langchain/langgraph");
 
+const AGENT_ROUTE_GRAPH_NAME = "agent-route-goal-runtime";
+const AGENT_ROUTE_GRAPH_NODES = Object.freeze([
+  "validate_request",
+  "initialize_runtime",
+  "plan_or_resume",
+  "begin_iteration",
+  "select_ready_task",
+  "run_ready_task",
+  "review_iteration",
+  "finalize_goal",
+  "complete_run"
+]);
+
 const AgentRouteGraphState = Annotation.Root({
   req: Annotation(),
   body: Annotation(),
@@ -9,15 +22,16 @@ const AgentRouteGraphState = Annotation.Root({
   send: Annotation(),
   phase: Annotation(),
   graphRun: Annotation(),
+  runtime: Annotation(),
+  next: Annotation(),
+  done: Annotation(),
+  iteration: Annotation(),
   steps: Annotation({
     reducer: (left = [], right = []) => left.concat(Array.isArray(right) ? right : [right]),
     default: () => []
   }),
   result: Annotation()
 });
-
-const AGENT_ROUTE_GRAPH_NAME = "agent-route-goal-runtime";
-const AGENT_ROUTE_GRAPH_NODES = Object.freeze(["validate_request", "prepare_run", "execute_goal", "complete_run"]);
 
 function assertFunction(value, name) {
   if (typeof value !== "function") {
@@ -66,7 +80,10 @@ function nodeEvent(state, node, status, extra = {}) {
 
 async function runInstrumentedNode(state, node, execute) {
   const startedAt = Date.now();
-  nodeEvent(state, node, "started");
+  nodeEvent(state, node, "started", {
+    phase: state.phase || "",
+    iteration: state.iteration || 0
+  });
   try {
     const result = await execute();
     nodeEvent(
@@ -77,21 +94,45 @@ async function runInstrumentedNode(state, node, execute) {
       node,
       "completed",
       {
-        elapsedMs: Date.now() - startedAt
+        elapsedMs: Date.now() - startedAt,
+        phase: result.phase || state.phase || "",
+        next: result.next || state.next || "",
+        done: Boolean(result.done),
+        iteration: result.iteration || state.iteration || 0
       }
     );
     return result;
   } catch (err) {
     nodeEvent(state, node, "failed", {
       elapsedMs: Date.now() - startedAt,
-      error: errorMessage(err)
+      error: errorMessage(err),
+      phase: state.phase || "",
+      iteration: state.iteration || 0
     });
     throw err;
   }
 }
 
-function createAgentRouteLangGraph({ runAgentRouteEvents }) {
-  const executeGoal = assertFunction(runAgentRouteEvents, "runAgentRouteEvents");
+function routeAfterPlan(state = {}) {
+  if (state.done) return "complete_run";
+  if (state.next === "finalize") return "finalize_goal";
+  if (state.next === "review") return "review_iteration";
+  if (state.next === "select_task") return "select_ready_task";
+  if (state.next === "run_task") return "run_ready_task";
+  return "begin_iteration";
+}
+
+function routeAfterRuntimeStep(state = {}) {
+  if (state.done) return "complete_run";
+  if (state.next === "finalize") return "finalize_goal";
+  if (state.next === "review") return "review_iteration";
+  if (state.next === "select_task") return "select_ready_task";
+  if (state.next === "run_task") return "run_ready_task";
+  return "begin_iteration";
+}
+
+function createAgentRouteLangGraph({ createRuntimeSession }) {
+  const makeRuntime = assertFunction(createRuntimeSession, "createRuntimeSession");
   return new StateGraph(AgentRouteGraphState)
     .addNode("validate_request", async (state) => {
       assertObject(state.req, "req");
@@ -102,46 +143,163 @@ function createAgentRouteLangGraph({ runAgentRouteEvents }) {
       return runInstrumentedNode({ ...state, graphRun }, "validate_request", async () => ({
         phase: "validated",
         graphRun,
+        done: false,
+        next: "initialize",
+        iteration: 0,
         steps: ["validate_request"]
       }));
     })
-    .addNode("prepare_run", async (state) =>
-      runInstrumentedNode(state, "prepare_run", async () => ({
-        phase: "prepared",
-        graphRun: state.graphRun || graphRunMetadata(state.body),
-        steps: ["prepare_run"]
-      }))
-    )
-    .addNode("execute_goal", async (state) =>
-      runInstrumentedNode(state, "execute_goal", async () => {
-        await executeGoal(state.req, state.body, state.nextHandler, state.send);
+    .addNode("initialize_runtime", async (state) =>
+      runInstrumentedNode(state, "initialize_runtime", async () => {
+        const runtime = await makeRuntime(state.req, state.body, state.nextHandler, state.send);
         return {
-          phase: "executed",
-          steps: ["execute_goal"]
+          phase: "initialized",
+          runtime,
+          next: "plan",
+          done: false,
+          iteration: 0,
+          steps: ["initialize_runtime"]
+        };
+      })
+    )
+    .addNode("plan_or_resume", async (state) =>
+      runInstrumentedNode(state, "plan_or_resume", async () => {
+        const runtime = assertObject(state.runtime, "runtime");
+        const result = await assertFunction(runtime.plan, "runtime.plan").call(runtime);
+        return {
+          ...result,
+          phase: result.done ? "completed" : result.next === "finalize" ? "finalizing" : "iterating",
+          runtime,
+          steps: ["plan_or_resume"]
+        };
+      })
+    )
+    .addNode("begin_iteration", async (state) =>
+      runInstrumentedNode(state, "begin_iteration", async () => {
+        const runtime = assertObject(state.runtime, "runtime");
+        const result = await assertFunction(runtime.beginIteration, "runtime.beginIteration").call(runtime);
+        return {
+          ...result,
+          phase: result.done ? "completed" : result.next === "finalize" ? "finalizing" : "iterating",
+          runtime,
+          steps: ["begin_iteration"]
+        };
+      })
+    )
+    .addNode("select_ready_task", async (state) =>
+      runInstrumentedNode(state, "select_ready_task", async () => {
+        const runtime = assertObject(state.runtime, "runtime");
+        const result = await assertFunction(runtime.selectReadyTask, "runtime.selectReadyTask").call(runtime);
+        return {
+          ...result,
+          phase: result.done ? "completed" : result.next === "finalize" ? "finalizing" : "draining",
+          runtime,
+          steps: ["select_ready_task"]
+        };
+      })
+    )
+    .addNode("run_ready_task", async (state) =>
+      runInstrumentedNode(state, "run_ready_task", async () => {
+        const runtime = assertObject(state.runtime, "runtime");
+        const result = await assertFunction(runtime.runReadyTask, "runtime.runReadyTask").call(runtime);
+        return {
+          ...result,
+          phase: result.done ? "completed" : result.next === "finalize" ? "finalizing" : "draining",
+          runtime,
+          steps: ["run_ready_task"]
+        };
+      })
+    )
+    .addNode("review_iteration", async (state) =>
+      runInstrumentedNode(state, "review_iteration", async () => {
+        const runtime = assertObject(state.runtime, "runtime");
+        const result = await assertFunction(runtime.reviewIteration, "runtime.reviewIteration").call(runtime);
+        return {
+          ...result,
+          phase: result.done ? "completed" : result.next === "finalize" ? "finalizing" : "reviewing",
+          runtime,
+          steps: ["review_iteration"]
+        };
+      })
+    )
+    .addNode("finalize_goal", async (state) =>
+      runInstrumentedNode(state, "finalize_goal", async () => {
+        const runtime = assertObject(state.runtime, "runtime");
+        const result = await assertFunction(runtime.finalize, "runtime.finalize").call(runtime);
+        return {
+          ...result,
+          phase: "finalized",
+          runtime,
+          done: true,
+          next: "complete",
+          steps: ["finalize_goal"]
         };
       })
     )
     .addNode("complete_run", async (state) =>
       runInstrumentedNode(state, "complete_run", async () => ({
         phase: "completed",
+        done: true,
+        next: "end",
         steps: ["complete_run"],
         result: {
           ok: true,
           goal_id: goalIdFromBody(state.body),
-          graph: state.graphRun
+          graph: state.graphRun,
+          runtimeResult: state.result || null
         }
       }))
     )
     .addEdge(START, "validate_request")
-    .addEdge("validate_request", "prepare_run")
-    .addEdge("prepare_run", "execute_goal")
-    .addEdge("execute_goal", "complete_run")
+    .addEdge("validate_request", "initialize_runtime")
+    .addEdge("initialize_runtime", "plan_or_resume")
+    .addConditionalEdges("plan_or_resume", routeAfterPlan, {
+      begin_iteration: "begin_iteration",
+      select_ready_task: "select_ready_task",
+      run_ready_task: "run_ready_task",
+      review_iteration: "review_iteration",
+      finalize_goal: "finalize_goal",
+      complete_run: "complete_run"
+    })
+    .addConditionalEdges("begin_iteration", routeAfterRuntimeStep, {
+      begin_iteration: "begin_iteration",
+      select_ready_task: "select_ready_task",
+      run_ready_task: "run_ready_task",
+      review_iteration: "review_iteration",
+      finalize_goal: "finalize_goal",
+      complete_run: "complete_run"
+    })
+    .addConditionalEdges("select_ready_task", routeAfterRuntimeStep, {
+      begin_iteration: "begin_iteration",
+      select_ready_task: "select_ready_task",
+      run_ready_task: "run_ready_task",
+      review_iteration: "review_iteration",
+      finalize_goal: "finalize_goal",
+      complete_run: "complete_run"
+    })
+    .addConditionalEdges("run_ready_task", routeAfterRuntimeStep, {
+      begin_iteration: "begin_iteration",
+      select_ready_task: "select_ready_task",
+      run_ready_task: "run_ready_task",
+      review_iteration: "review_iteration",
+      finalize_goal: "finalize_goal",
+      complete_run: "complete_run"
+    })
+    .addConditionalEdges("review_iteration", routeAfterRuntimeStep, {
+      begin_iteration: "begin_iteration",
+      select_ready_task: "select_ready_task",
+      run_ready_task: "run_ready_task",
+      review_iteration: "review_iteration",
+      finalize_goal: "finalize_goal",
+      complete_run: "complete_run"
+    })
+    .addEdge("finalize_goal", "complete_run")
     .addEdge("complete_run", END)
     .compile({ name: AGENT_ROUTE_GRAPH_NAME });
 }
 
-async function runAgentRouteLangGraph({ req, body, nextHandler, send, runAgentRouteEvents }) {
-  const graph = createAgentRouteLangGraph({ runAgentRouteEvents });
+async function runAgentRouteLangGraph({ req, body, nextHandler, send, createRuntimeSession }) {
+  const graph = createAgentRouteLangGraph({ createRuntimeSession });
   return graph.invoke({
     req,
     body,

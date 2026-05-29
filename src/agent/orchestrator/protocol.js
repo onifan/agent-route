@@ -15,13 +15,13 @@ const KIND = {
 
 const ROLE_SCHEMAS = {
   [KIND.PLAN]:
-    '{"kind":"plan","schemaVersion":1,"tasks":[{"id":"short","title":"short","description":"what to do","type":"analysis|web_search|web_read|api_read|document_generate|verification|browser|local_execution","modelPool":"free|strong|coding|codex-cli","toolWorker":"web|document|browser|none","dependsOn":[],"successCriteria":[],"prompt":"specific worker instruction","input":"short query/url/input","riskLevel":"low|medium|high|critical","riskReasons":[],"routingReason":"short reason","maxAttempts":2}]}',
+    '{"kind":"plan","schemaVersion":1,"tasks":[{"id":"short","title":"short","description":"what to do","type":"analysis|web_search|web_read|api_read|local_read|document_generate|verification|browser|local_execution","modelPool":"free|strong|coding|codex-cli","toolWorker":"web|files|document|browser|none","dependsOn":[],"successCriteria":[],"prompt":"specific worker instruction","input":"short query/url/local-path/input","riskLevel":"low|medium|high|critical","riskReasons":[],"routingReason":"short reason","maxAttempts":2}]}',
   [KIND.WORKER_RESULT]:
     '{"kind":"worker_result","schemaVersion":1,"status":"success|failure|retry|blocked|awaiting_confirmation","actions":[],"output":"result","error":"","nextStep":"","artifacts":[],"evidence":{"summary":"what was observed","claims":[],"browser":{"beforeUrl":"","afterUrl":"","domChanged":false,"successMessage":"","errorMessage":"","screenshot":"","snapshot":""},"shell":{"command":"","exitCode":0,"stderr":"","stdout":"","outputDirs":[]},"files":[{"path":"","exists":true,"size":-1,"beforeSize":-1,"afterSize":-1,"role":"read|artifact|output|modified","expectedContent":"","expectedContentRequired":false}],"apiResponses":[{"url":"","status":200,"body":"","writeConfirmed":false}],"semantic":{"outputSummary":"","addressesCriteria":true,"criteriaCoverage":1,"qualityScore":1,"qualityIssues":[]}},"memoryCandidates":[],"riskLevel":"low|medium|high|critical","riskReasons":[]}',
   [KIND.VERIFICATION_RESULT]:
     '{"kind":"verification_result","schemaVersion":1,"verified":false,"verificationStatus":"verified|partially_verified|unverified","confidence":0.0,"reasons":[],"detectedIssues":[{"issue":"","severity":"low|medium|high|critical","retryable":true}],"reasonCode":"short","missingEvidence":[],"rejectedEvidence":[],"suggestedNextState":"completed|retrying|needs_evidence|failed|blocked|waiting_human","retryable":true}',
   [KIND.GOAL_REVIEW]:
-    '{"kind":"goal_review","schemaVersion":1,"status":"done|continue","progress_summary":"short","final_answer":"markdown if done","strategy_revision_reason":"","next_tasks":[{"id":"short","title":"short","description":"what to do","type":"analysis|coding|browser|web_search|web_read|api_read|document_generate|verification|decision|local_execution|general","modelPool":"free|coding|strong|commander|codex-cli","toolWorker":"web|document|browser|none","difficulty":"low|medium|high|critical","riskLevel":"low|medium|high|critical","riskReasons":["short reason"],"successCriteria":["specific pass condition"],"dependsOn":["prior_task_id"],"produces":["artifact_id"],"consumes":["artifact_id"],"priority":0,"retryPolicy":{"scope":"self|downstream","maxRetries":1},"maxAttempts":2,"requiresHumanApproval":false,"requiresHumanConfirmation":false,"strategyId":"","strategicObjective":"","strategicPhase":"","strategicRationale":"","routingReason":"","prompt":"specific worker instruction","input":"task input"}],"memory_candidates":[{"type":"knowledge|episodic|procedure|working","importance":1,"title":"short","summary":"durable non-sensitive lesson","tags":["short"]}]}',
+    '{"kind":"goal_review","schemaVersion":1,"status":"done|continue","progress_summary":"short","final_answer":"markdown if done","strategy_revision_reason":"","next_tasks":[{"id":"short","title":"short","description":"what to do","type":"analysis|coding|browser|web_search|web_read|api_read|local_read|document_generate|verification|decision|local_execution|general","modelPool":"free|coding|strong|commander|codex-cli","toolWorker":"web|files|document|browser|none","difficulty":"low|medium|high|critical","riskLevel":"low|medium|high|critical","riskReasons":["short reason"],"successCriteria":["specific pass condition"],"dependsOn":["prior_task_id"],"produces":["artifact_id"],"consumes":["artifact_id"],"priority":0,"retryPolicy":{"scope":"self|downstream","maxRetries":1},"maxAttempts":2,"requiresHumanApproval":false,"requiresHumanConfirmation":false,"strategyId":"","strategicObjective":"","strategicPhase":"","strategicRationale":"","routingReason":"","prompt":"specific worker instruction","input":"task input"}],"memory_candidates":[{"type":"knowledge|episodic|procedure|working","importance":1,"title":"short","summary":"durable non-sensitive lesson","tags":["short"]}]}',
   [KIND.FINAL_ANSWER]:
     '{"kind":"final_answer","schemaVersion":1,"status":"completed|partial|failed|blocked|waiting_human","answerMarkdown":"final user-facing markdown answer","artifacts":[{"path":"","format":"","size":0,"hash":"","createdAt":"","verificationSummary":""}],"evidenceSummary":[],"uncertainties":[],"nextSteps":[]}'
 };
@@ -216,7 +216,7 @@ function artifactSchema() {
   });
 }
 
-const RESPONSE_FORMAT_SCHEMAS = {
+const FUNCTION_ARGUMENT_SCHEMAS = {
   [KIND.PLAN]: strictObject({
     kind: { type: "string", enum: [KIND.PLAN] },
     schemaVersion: { type: "integer", enum: [PROTOCOL_VERSION] },
@@ -295,27 +295,27 @@ const ROLE_INSTRUCTIONS = {
   [KIND.PLAN]: {
     role: "planner / commander",
     task: "把用户目标拆成下一批安全、可验证、可执行的任务图。",
-    reasoning: "先在内部逐步检查目标、约束、风险、依赖、证据缺口和预算，再输出计划 JSON。"
+    reasoning: "先在内部逐步检查目标、约束、风险、依赖、证据缺口和预算，再提交计划参数。"
   },
   [KIND.WORKER_RESULT]: {
     role: "worker",
     task: "只汇报本次 worker 实际完成的动作、输出、错误和证据。",
-    reasoning: "先在内部逐步核对任务要求、已执行动作、证据是否真实、是否需要阻塞或重试，再输出结果 JSON。"
+    reasoning: "先在内部逐步核对任务要求、已执行动作、证据是否真实、是否需要阻塞或重试，再提交结果参数。"
   },
   [KIND.VERIFICATION_RESULT]: {
     role: "verification",
     task: "基于 worker result 和 evidence 判断任务是否真的满足成功标准。",
-    reasoning: "先在内部逐步核对证据、成功标准、风险、缺口和可重试性，再输出验证 JSON。"
+    reasoning: "先在内部逐步核对证据、成功标准、风险、缺口和可重试性，再提交验证参数。"
   },
   [KIND.GOAL_REVIEW]: {
     role: "reviewer / commander",
     task: "复盘当前执行图，决定目标是否完成，或规划下一批必要任务。",
-    reasoning: "先在内部逐步核对已完成任务、失败任务、验证状态、依赖、预算和剩余缺口，再输出复盘 JSON。"
+    reasoning: "先在内部逐步核对已完成任务、失败任务、验证状态、依赖、预算和剩余缺口，再提交复盘参数。"
   },
   [KIND.FINAL_ANSWER]: {
     role: "finalizer / commander",
     task: "基于已验证 worker evidence 生成最终用户可见答案。",
-    reasoning: "先在内部逐步区分证据、推断、不确定性和失败缺口，再输出最终答案 JSON。"
+    reasoning: "先在内部逐步区分证据、推断、不确定性和失败缺口，再提交最终答案参数。"
   }
 };
 
@@ -341,6 +341,31 @@ const FEW_SHOTS = {
             riskLevel: "low",
             riskReasons: [],
             routingReason: "公开联网取证应由 web tool 执行。",
+            maxAttempts: 2
+          }
+        ]
+      }
+    },
+    {
+      input: "用户目标: 只读分析本机项目目录，不修改文件。",
+      output: {
+        kind: "plan",
+        schemaVersion: 1,
+        tasks: [
+          {
+            id: "read-local-project",
+            title: "读取本机项目证据",
+            description: "只读读取本机项目目录，返回路径、目录清单和关键文本文件摘录。",
+            type: "local_read",
+            modelPool: "free",
+            toolWorker: "files",
+            dependsOn: [],
+            successCriteria: ["返回 path/exists/size evidence", "包含目录 inventory 和文本摘录"],
+            prompt: "只读读取指定本地目录，不修改、不安装、不运行命令。",
+            input: "/path/to/project",
+            riskLevel: "low",
+            riskReasons: [],
+            routingReason: "本地文件取证应由 files MCP worker 执行。",
             maxAttempts: 2
           }
         ]
@@ -555,19 +580,25 @@ function examplesFor(kind) {
   if (!examples.length) return "";
   return examples
     .map((example, index) =>
-      [`示例 ${index + 1} 输入: ${example.input}`, `示例 ${index + 1} 输出: ${JSON.stringify(example.output)}`].join(
-        "\n"
-      )
+      [
+        `示例 ${index + 1} 输入: ${example.input}`,
+        `示例 ${index + 1} function arguments: ${JSON.stringify(example.output)}`
+      ].join("\n")
     )
     .join("\n");
 }
 
-function baseContract(kind) {
+function functionNameForKind(kind = "") {
+  return `agent_route_${String(kind || "structured_output").replace(/[^A-Za-z0-9_]+/g, "_")}`;
+}
+
+function baseContract(kind, options = {}) {
   const expected = String(kind || "");
+  const payloadOnly = options.transport === "payload";
   const instruction = ROLE_INSTRUCTIONS[expected] || {
     role: "agent",
     task: "完成当前阶段任务。",
-    reasoning: "先在内部逐步推理，再输出 JSON。"
+    reasoning: "先在内部逐步推理，再提交结构化参数。"
   };
   return [
     "[结构化指令]",
@@ -576,10 +607,16 @@ function baseContract(kind) {
     "[任务]",
     instruction.task,
     "[约束]",
-    "只返回一个 JSON 对象；第一个字符必须是 {，最后一个字符必须是 }。",
-    "不得输出 Markdown、代码围栏、解释文字、多个 JSON、候选方案、草稿或重复对象。",
+    payloadOnly
+      ? "本工具结果 payload 必须是一个 JSON 对象；第一个字符必须是 {，最后一个字符必须是 }。"
+      : `必须调用指定 function "${functionNameForKind(expected)}" 恰好一次，并把唯一结构化对象放入 arguments。`,
+    payloadOnly
+      ? "不得输出 Markdown、代码围栏、解释文字、多个 JSON、候选方案、草稿或重复对象。"
+      : "不要在 assistant content 中输出 JSON、Markdown、解释文字、候选方案或草稿；结构化结果只允许出现在 function arguments 中。",
     "如果需要表达多个任务、动作、文件、证据或下一步，必须放进同一个顶层对象的数组字段里；严禁为每个条目输出一个新的顶层 JSON 对象。",
-    "如果底层服务请求多个候选、样本或 continuation，只选择第一个候选并输出一次；完成最后一个 } 后立即停止，不得再输出第二个 { 或任何非空白字符。",
+    payloadOnly
+      ? "如果底层服务请求多个候选、样本或 continuation，只选择第一个候选并输出一次；完成最后一个 } 后立即停止，不得再输出第二个 { 或任何非空白字符。"
+      : "不得调用多个 function，也不得使用旧 function_call 或文本 JSON 响应代替指定 tool call。",
     "不得使用 fallback、mock、预置答案、模板兜底或任务专用硬编码伪造成成功。",
     "[内部逐步推理]",
     `${instruction.reasoning} 不要输出完整 chain-of-thought/思维链；只把简短、可审计的依据写入 schema 中的 reasons、riskReasons、progress_summary、evidence、uncertainties 或 nextStep 等字段。`,
@@ -588,53 +625,95 @@ function baseContract(kind) {
     `顶层字段 kind 必须精确等于 "${expected}"，schemaVersion 必须等于 ${PROTOCOL_VERSION}。`,
     "所有必填字段都必须出现；没有内容时用空字符串、空数组或 false，不要省略字段。",
     "字段名必须使用 schema 中的 camelCase/snake_case 原名；不要改名、翻译字段名或增加外层 payload。",
-    `Schema: ${ROLE_SCHEMAS[expected] || "{}"}`,
+    `${payloadOnly ? "Payload" : "Function arguments"} Schema: ${ROLE_SCHEMAS[expected] || "{}"}`,
     "[Few-shot 示例]",
     examplesFor(expected),
-    "Few-shot 示例只说明格式，不是本次输出内容；不要复制示例对象，也不要先输出示例再输出答案。"
+    "Few-shot 示例只说明格式，不是本次调用参数；不要复制示例对象，也不要先提交示例再提交答案。"
   ].join("\n");
 }
 
-function responseFormatName(kind = "") {
-  return `agent_route_${String(kind || "json").replace(/[^A-Za-z0-9_]+/g, "_")}`;
-}
-
-function responseFormatForKind(kind = "") {
-  const schema = RESPONSE_FORMAT_SCHEMAS[kind];
-  if (!schema) return { type: "json_object" };
+function functionToolForKind(kind = "") {
+  const schema = FUNCTION_ARGUMENT_SCHEMAS[kind];
+  if (!schema) throw new Error(`No function argument schema registered for ${String(kind || "unknown kind")}.`);
   return {
-    type: "json_schema",
-    json_schema: {
-      name: responseFormatName(kind),
+    type: "function",
+    function: {
+      name: functionNameForKind(kind),
+      description: `Submit the AgentRoute ${kind} structured result.`,
       strict: true,
-      schema
+      parameters: schema
     }
   };
 }
 
-function jsonModeRequestBody(body = {}, endpointMode = "chat", kind = "") {
-  if (endpointMode !== "chat") return body;
-  if (body.response_format) return body;
-  return {
+function functionCallingRequestBody(body = {}, endpointMode = "chat", kind = "") {
+  if (endpointMode !== "chat") {
+    throw new Error("AgentRoute structured model stages require the chat/completions function-calling transport.");
+  }
+  const functionName = functionNameForKind(kind);
+  const next = {
     ...body,
-    response_format: responseFormatForKind(kind)
+    tools: [functionToolForKind(kind)],
+    tool_choice: { type: "function", function: { name: functionName } },
+    parallel_tool_calls: false
   };
+  delete next.response_format;
+  delete next.functions;
+  delete next.function_call;
+  return next;
+}
+
+function functionArgumentsFromResponse(data, expectedKind) {
+  const message = data && data.choices && data.choices[0] && data.choices[0].message;
+  const calls = message && Array.isArray(message.tool_calls) ? message.tool_calls : [];
+  if (calls.length !== 1) {
+    return {
+      ok: false,
+      content: "",
+      error: `Structured model response must call ${functionNameForKind(expectedKind)} exactly once.`
+    };
+  }
+  if (calls[0].type !== "function") {
+    return {
+      ok: false,
+      content: "",
+      error: `Structured model response must use a function tool call for ${functionNameForKind(expectedKind)}.`
+    };
+  }
+  const calledFunction = calls[0] && calls[0].function;
+  const actualName = String((calledFunction && calledFunction.name) || "");
+  const expectedName = functionNameForKind(expectedKind);
+  if (actualName !== expectedName) {
+    return {
+      ok: false,
+      content: "",
+      error: `Structured model response called ${actualName || "an unnamed function"}; expected ${expectedName}.`
+    };
+  }
+  if (!calledFunction || typeof calledFunction.arguments !== "string" || !calledFunction.arguments.trim()) {
+    return {
+      ok: false,
+      content: "",
+      error: `Function ${expectedName} returned empty arguments.`
+    };
+  }
+  return { ok: true, content: calledFunction.arguments, error: "" };
 }
 
 function validateKind(value, expectedKind) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
-    return { ok: false, error: "Structured output must be a JSON object." };
+    return { ok: false, error: "Function arguments must be a JSON object." };
   }
   if (value.kind !== expectedKind) {
     return {
       ok: false,
-      error: `Structured output kind must be ${expectedKind}.`
+      error: `Function arguments kind must be ${expectedKind}.`
     };
   }
   if (Number(value.schemaVersion) !== PROTOCOL_VERSION) {
     return {
       ok: false,
-      error: `Structured output schemaVersion must be ${PROTOCOL_VERSION}.`
+      error: `Function arguments schemaVersion must be ${PROTOCOL_VERSION}.`
     };
   }
   return { ok: true };
@@ -648,7 +727,7 @@ function parseProtocolContent(content, expectedKind, validatePayload) {
       ok: false,
       value: null,
       diagnostics,
-      error: "Structured output must contain exactly one valid JSON object."
+      error: "Function arguments must contain exactly one valid JSON object."
     };
   }
   const kindValidation = validateKind(parsed, expectedKind);
@@ -662,7 +741,7 @@ function parseProtocolContent(content, expectedKind, validatePayload) {
         ok: false,
         value: null,
         diagnostics,
-        error: payloadValidation.error || "Structured output payload is invalid."
+        error: payloadValidation.error || "Function arguments payload is invalid."
       };
     }
   }
@@ -683,11 +762,14 @@ function validationForCall(content, expectedKind, validatePayload) {
 module.exports = {
   KIND,
   PROTOCOL_VERSION,
-  RESPONSE_FORMAT_SCHEMAS,
+  FUNCTION_ARGUMENT_SCHEMAS,
   ROLE_SCHEMAS,
   STRUCTURED_OUTPUT_SCHEMA_NAME,
   baseContract,
-  jsonModeRequestBody,
+  functionArgumentsFromResponse,
+  functionCallingRequestBody,
+  functionNameForKind,
+  functionToolForKind,
   parseProtocolContent,
   validationForCall,
   validateKind

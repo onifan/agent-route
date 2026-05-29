@@ -49,7 +49,7 @@ export const SUBSCRIPTION_CONFIG = {
 // API endpoints
 export const API_ENDPOINTS = {
   users: "/api/users",
-  providers: "/api/providers",
+  modelApis: "/api/model-apis",
   payments: "/api/payments",
   auth: "/api/auth"
 };
@@ -64,22 +64,14 @@ export const CLIENT_STORE_TTL_MS = 60000;
 
 // Provider API endpoints (for display only)
 export const PROVIDER_ENDPOINTS = {
-  openrouter: "https://openrouter.ai/api/v1/chat/completions",
-  glm: "https://api.z.ai/api/anthropic/v1/messages",
-  "glm-cn": "https://open.bigmodel.cn/api/coding/paas/v4/chat/completions",
-  kimi: "https://api.kimi.com/coding/v1/messages",
-  minimax: "https://api.minimax.io/anthropic/v1/messages",
-  "minimax-cn": "https://api.minimaxi.com/anthropic/v1/messages",
-  alicode: "https://coding.dashscope.aliyuncs.com/v1/chat/completions",
-  "alicode-intl": "https://coding-intl.dashscope.aliyuncs.com/v1/chat/completions",
-  "volcengine-ark": "https://ark.cn-beijing.volces.com/api/coding/v3/chat/completions",
-  byteplus: "https://ark.ap-southeast.bytepluses.com/api/coding/v3/chat/completions",
   openai: "https://api.openai.com/v1/chat/completions",
-  "vercel-ai-gateway": "https://ai-gateway.vercel.sh/v1/chat/completions",
-  anthropic: "https://api.anthropic.com/v1/messages",
-  gemini: "https://generativelanguage.googleapis.com/v1beta/models",
-  ollama: "https://ollama.com/api/chat",
-  "ollama-local": "http://localhost:11434/api/chat"
+  claude: "https://api.anthropic.com/v1/messages",
+  gemini: "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+  grok: "https://api.x.ai/v1/chat/completions",
+  deepseek: "https://api.deepseek.com/chat/completions",
+  qwen: "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
+  glm: "https://open.bigmodel.cn/api/paas/v4/chat/completions",
+  kimi: "https://api.moonshot.cn/v1/chat/completions"
 };
 
 // Re-export from providers.js for backward compatibility

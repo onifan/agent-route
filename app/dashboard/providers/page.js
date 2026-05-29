@@ -1,5 +1,5 @@
-import ProvidersDashboard from "./provider-console";
+import { redirect } from "next/navigation";
 
 export default function ProvidersPage() {
-  return <ProvidersDashboard />;
+  redirect("/agent-route#model-apis");
 }

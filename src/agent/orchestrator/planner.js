@@ -4,26 +4,26 @@ const dependencyEngine = require("../graph");
 const { jsonParseDiagnostics, lastUserText, messagesToText, runtimeTemporalContext } = require("./content-utils");
 const protocol = require("./protocol");
 
-function normalizeComplexity(value, fallback = "medium") {
-  const raw = String(value || fallback || "medium")
+function normalizeComplexity(value, defaultValue = "medium") {
+  const raw = String(value || defaultValue || "medium")
     .trim()
     .toLowerCase();
   if (["trivial", "simple", "easy", "low"].includes(raw)) return "low";
   if (["medium", "normal", "moderate", "standard"].includes(raw)) return "medium";
   if (["high", "hard", "complex", "advanced"].includes(raw)) return "high";
   if (["critical", "expert", "very_high", "very-high", "max"].includes(raw)) return "critical";
-  return fallback;
+  return defaultValue;
 }
 
-function normalizeRiskLevel(value, fallback = "low") {
-  const raw = String(value || fallback || "low")
+function normalizeRiskLevel(value, defaultValue = "low") {
+  const raw = String(value || defaultValue || "low")
     .trim()
     .toLowerCase();
   if (["none", "safe", "low", "l0"].includes(raw)) return "low";
   if (["medium", "moderate", "normal", "l1"].includes(raw)) return "medium";
   if (["high", "risky", "l2"].includes(raw)) return "high";
   if (["critical", "danger", "severe", "l3"].includes(raw)) return "critical";
-  return fallback;
+  return defaultValue;
 }
 
 function normalizeStringList(value) {
@@ -130,6 +130,44 @@ function hasLocalFileReference(value = "") {
   return /(?:本机|本地|local|workspace|repo|repository|project|项目|文件|目录|路径|path)[^。.;\n]{0,160}(?:README(?:\.md)?|package\.json|[A-Za-z0-9_-]+\.(?:js|jsx|ts|tsx|json|md|mjs|cjs|css|html|yml|yaml|toml)|(?:^|[\s])(?:app|src|docs|scripts|public|config)\/)/i.test(
     text
   );
+}
+
+function isLocalReadType(type = "") {
+  return /^(local_read|file_read|files_read|filesystem_read|directory_read|project_read|repo_read|repository_read)$/i.test(
+    String(type || "")
+  );
+}
+
+function stripNegatedMutationText(value = "") {
+  return String(value || "")
+    .replace(
+      /(?:不要|不允许|禁止|不得|请勿|不需要|do not|don't|never|without|no)[^。.;\n]*(?:写入|创建|保存|导出|删除|安装|修改|更新|执行|运行|启动|write|create|save|export|delete|install|modify|update|execute|run|start)[^。.;\n]*/gi,
+      " "
+    )
+    .replace(
+      /(?:只读|read[-\s]?only)[^。.;\n]*(?:写入|创建|保存|导出|删除|安装|修改|更新|执行|运行|启动|write|create|save|export|delete|install|modify|update|execute|run|start)[^。.;\n]*/gi,
+      " "
+    );
+}
+
+function hasLocalMutationIntent(value = "") {
+  const text = stripNegatedMutationText(String(value || "").toLowerCase());
+  return /(?:写入|创建|保存|导出|删除|安装|修改|更新|执行命令|运行命令|启动服务|改代码|改文件|write|create|save|export|delete|install|modify|update|edit|patch|run command|execute command|start server|npm install|pnpm install|yarn install)/i.test(
+    text
+  );
+}
+
+function isReadOnlyLocalFileTask(value = "") {
+  const text = String(value || "");
+  if (!hasLocalFileReference(text)) return false;
+  if (hasLocalMutationIntent(text)) return false;
+  if (
+    /只读|读取|查看|检查|扫描|列出|枚举|分析|理解|摘录|证据|read[-\s]?only|read|inspect|scan|list|inventory|summari[sz]e|analy[sz]e/i.test(
+      text
+    )
+  )
+    return true;
+  return true;
 }
 
 function hasBrowserOrLocalOperationRequiringCodex(value = "") {
@@ -350,7 +388,73 @@ function isReadOnlyBrowserGoal(messages = []) {
 
 function baselinePlan(messages = []) {
   const input = baselinePlanInput(messages);
+  const needsLocalReadTool = isReadOnlyLocalFileTask(input);
   if (shouldUseDocumentWorker(messages)) {
+    if (needsLocalReadTool) {
+      return {
+        tasks: [
+          {
+            id: "local-file-evidence",
+            title: "Collect local file evidence",
+            description: "Read the requested local file or project directory as read-only evidence.",
+            type: "local_read",
+            modelPool: "free",
+            toolWorker: "files",
+            difficulty: "low",
+            complexity: "low",
+            riskLevel: "low",
+            routingReason: "Local source inspection is handled by the read-only files worker.",
+            input,
+            successCriteria: ["Local path evidence includes file inventory and readable text excerpts."],
+            dependencies: [],
+            produces: ["local_file_evidence"],
+            maxAttempts: 2,
+            requiresHumanConfirmation: false,
+            prompt: "Read the requested local files or directory without modifying anything."
+          },
+          {
+            id: "prepare-document-content",
+            title: "Prepare document content",
+            description: "Prepare the document body from verified local file evidence and the user goal.",
+            type: "analysis",
+            modelPool: "free",
+            difficulty: "low",
+            complexity: "low",
+            riskLevel: "low",
+            routingReason: "Models may draft document content after deterministic local evidence is collected.",
+            input,
+            successCriteria: ["Document body is explicit and grounded in local file evidence."],
+            dependencies: ["local-file-evidence"],
+            consumes: ["local_file_evidence"],
+            produces: ["document_content"],
+            maxAttempts: 1,
+            requiresHumanConfirmation: false,
+            prompt:
+              "Prepare the document body from upstream local file evidence. Do not claim any file has been created."
+          },
+          {
+            id: "render-document-artifact",
+            title: "Render document artifact",
+            description: "Render the prepared content into the requested document file format.",
+            type: "document_generate",
+            modelPool: "free",
+            toolWorker: "document",
+            difficulty: "low",
+            complexity: "low",
+            riskLevel: "low",
+            routingReason: "Document artifacts must be created by the generic document tool with file evidence.",
+            input,
+            successCriteria: ["A real artifact path, file size, hash, and format evidence are returned."],
+            dependencies: ["prepare-document-content"],
+            consumes: ["document_content"],
+            produces: ["document_artifact"],
+            maxAttempts: 1,
+            requiresHumanConfirmation: false,
+            prompt: "Render the upstream document content into a real file artifact. Do not invent document content."
+          }
+        ]
+      };
+    }
     return {
       tasks: [
         {
@@ -476,6 +580,49 @@ function baselinePlan(messages = []) {
           maxAttempts: 1,
           requiresHumanConfirmation: false,
           prompt: "Verify that the web answer is grounded in collected tool evidence."
+        }
+      ]
+    };
+  }
+  if (needsLocalReadTool) {
+    return {
+      tasks: [
+        {
+          id: "local-file-evidence",
+          title: "Collect local file evidence",
+          description: "Read the requested local file or project directory as read-only evidence.",
+          type: "local_read",
+          modelPool: "free",
+          toolWorker: "files",
+          difficulty: "low",
+          complexity: "low",
+          riskLevel: "low",
+          routingReason: "Local source inspection is handled by the read-only files worker.",
+          input,
+          successCriteria: ["Local path evidence includes file inventory and readable text excerpts."],
+          dependencies: [],
+          produces: ["local_file_evidence"],
+          maxAttempts: 2,
+          requiresHumanConfirmation: false,
+          prompt: "Read the requested local files or directory without modifying anything."
+        },
+        {
+          id: "analyze-local-evidence",
+          title: "Analyze local file evidence",
+          description: "Analyze the collected local file evidence and answer the user goal.",
+          type: "analysis",
+          modelPool: "free",
+          difficulty: "medium",
+          complexity: "medium",
+          riskLevel: "low",
+          routingReason: "Models analyze deterministic local file evidence after the files worker reads it.",
+          input,
+          successCriteria: ["The answer is grounded in collected local file evidence."],
+          dependencies: ["local-file-evidence"],
+          consumes: ["local_file_evidence"],
+          maxAttempts: 1,
+          requiresHumanConfirmation: false,
+          prompt: "Analyze upstream local file evidence and produce a grounded answer. Do not claim any new file reads."
         }
       ]
     };
@@ -636,6 +783,9 @@ function normalizePlan(plan, config, messages = [], strategy = null) {
       .join("\n");
     const taskAndInput = [taskActionText, input].join("\n");
     const rawExplicitWebTool = String(task.toolWorker || task.tool_worker || "").toLowerCase() === "web";
+    const explicitFilesTool = ["files", "file", "local_read", "filesystem"].includes(
+      String(task.toolWorker || task.tool_worker || "").toLowerCase()
+    );
     const explicitDocumentTool = ["document", "documents"].includes(
       String(task.toolWorker || task.tool_worker || "").toLowerCase()
     );
@@ -647,10 +797,20 @@ function normalizePlan(plan, config, messages = [], strategy = null) {
     );
     const explicitWebTool = rawExplicitWebTool && !localFileOperation;
     const explicitWebType = isWebToolType(rawType) && !localFileOperation;
+    const explicitLocalReadType = isLocalReadType(rawType);
     const explicitDocumentType = isDocumentGenerationType(rawType);
+    const taskWantsDocumentOutput =
+      explicitDocumentTool || explicitDocumentType || hasDocumentFileOutputIntent(taskActionText);
     const taskSpecificRequiresCodex = hasBrowserOrLocalOperationRequiringCodex(taskActionText);
     const broaderInputRequiresCodex =
       !explicitWebType && hasBrowserOrLocalOperationRequiringCodex(explicitInput || conversationInput);
+    const readOnlyLocalFileTask =
+      !taskSpecificRequiresCodex &&
+      !broaderInputRequiresCodex &&
+      !taskWantsDocumentOutput &&
+      (explicitFilesTool ||
+        explicitLocalReadType ||
+        (localFileOperation && isReadOnlyLocalFileTask([taskAndInput, conversationInput].join("\n"))));
     const taskActionTextWithoutUrls = stripHttpUrls(taskActionText);
     const readOnlyPublicUrlTask =
       hasPublicHttpUrl(taskAndInput) &&
@@ -668,6 +828,8 @@ function normalizePlan(plan, config, messages = [], strategy = null) {
       isReadOnlyExternalResearchText(taskAndInput);
     const shouldRouteExternalReadToWeb =
       !isNonExecutablePlanningType(rawType) &&
+      !localFileOperation &&
+      !readOnlyLocalFileTask &&
       !explicitDocumentTool &&
       !explicitDocumentType &&
       !taskSpecificRequiresCodex &&
@@ -681,21 +843,30 @@ function normalizePlan(plan, config, messages = [], strategy = null) {
     const shouldRouteDocumentGeneration =
       !hasFileWriteProhibition([conversationInput, taskActionText, input].join("\n")) &&
       !shouldRouteExternalReadToWeb &&
+      !readOnlyLocalFileTask &&
       !isNonExecutablePlanningType(rawType) &&
-      (explicitDocumentTool || explicitDocumentType || hasDocumentFileOutputIntent(taskActionText));
-    const shouldRouteLocalToCodex =
+      taskWantsDocumentOutput;
+    const shouldRouteLocalRead =
       !shouldRouteExternalReadToWeb &&
       !shouldRouteDocumentGeneration &&
       !isNonExecutablePlanningType(rawType) &&
-      (localFileOperation ||
+      readOnlyLocalFileTask;
+    const shouldRouteLocalToCodex =
+      !shouldRouteExternalReadToWeb &&
+      !shouldRouteDocumentGeneration &&
+      !shouldRouteLocalRead &&
+      !isNonExecutablePlanningType(rawType) &&
+      (hasLocalMutationIntent([taskActionText, explicitInput || conversationInput].join("\n")) ||
         hasBrowserOrLocalOperationRequiringCodex([taskActionText, explicitInput || conversationInput].join("\n")));
     const requestedPool = shouldRouteExternalReadToWeb
       ? "free"
       : shouldRouteDocumentGeneration
         ? "free"
-        : shouldRouteLocalToCodex
-          ? "codex-cli"
-          : requestedPoolFromPlan;
+        : shouldRouteLocalRead
+          ? "free"
+          : shouldRouteLocalToCodex
+            ? "codex-cli"
+            : requestedPoolFromPlan;
     const readOnlyBrowserTask =
       requestedPool === "codex-cli" &&
       !localFileOperation &&
@@ -755,22 +926,22 @@ function normalizePlan(plan, config, messages = [], strategy = null) {
           ? "document_generate"
           : readOnlyBrowserTask
             ? "browser"
-            : localFileOperation
-              ? "local_execution"
+            : shouldRouteLocalRead
+              ? "local_read"
               : rawType,
       modelPool,
       toolWorker: shouldRouteExternalReadToWeb
         ? "web"
         : shouldRouteDocumentGeneration
           ? "document"
-          : localFileOperation
-            ? undefined
+          : shouldRouteLocalRead
+            ? "files"
             : String(task.toolWorker || task.tool_worker || "").toLowerCase() || undefined,
       difficulty,
       complexity: difficulty,
       riskLevel: shouldRouteExternalReadToWeb
         ? "low"
-        : readOnlyBrowserTask
+        : readOnlyBrowserTask || shouldRouteLocalRead
           ? "low"
           : normalizeRiskLevel(task.riskLevel || task.risk_level || task.risk || "low"),
       riskReasons: normalizeStringList(task.riskReasons || task.risk_reasons),
@@ -783,7 +954,9 @@ function normalizePlan(plan, config, messages = [], strategy = null) {
           ? ["web_evidence"]
           : shouldRouteDocumentGeneration && !produces.length
             ? ["document_artifact"]
-            : produces,
+            : shouldRouteLocalRead && !produces.length
+              ? ["local_file_evidence"]
+              : produces,
       consumes,
       priority: Number.isFinite(Number(task.priority)) ? Number(task.priority) : 0,
       retryPolicy:
@@ -822,7 +995,14 @@ function normalizePlan(plan, config, messages = [], strategy = null) {
                 task.reason ||
                 "Document files are rendered by the generic document tool with file evidence and artifacts."
             )
-          : String(task.routingReason || task.routing_reason || task.reason || ""),
+          : shouldRouteLocalRead
+            ? String(
+                task.routingReason ||
+                  task.routing_reason ||
+                  task.reason ||
+                  "Read-only local filesystem evidence is collected by the files MCP worker."
+              )
+            : String(task.routingReason || task.routing_reason || task.reason || ""),
       prompt: shouldRouteExternalReadToWeb
         ? String(
             task.prompt ||
@@ -837,7 +1017,14 @@ function normalizePlan(plan, config, messages = [], strategy = null) {
                 task.goal ||
                 "Render upstream document content into a real file artifact with path, size, hash, and format evidence."
             )
-          : String(task.prompt || task.title || task.goal || "Work on the user goal.")
+          : shouldRouteLocalRead
+            ? String(
+                task.prompt ||
+                  task.title ||
+                  task.goal ||
+                  "Collect read-only local file evidence with path, inventory, and readable text excerpts."
+              )
+            : String(task.prompt || task.title || task.goal || "Work on the user goal.")
     };
   });
   return {
@@ -897,6 +1084,9 @@ function makePlanPrompt(messages, config, memoryText = "", strategy = null, opti
           ? "文档输出要拆内容准备和真实文件生成；文件生成用 type document_generate、toolWorker document、modelPool free，要求 path/format/size/hash/createdAt evidence。"
           : "",
         needsDocumentTool ? "文档工具只渲染上游内容，不补事实、不伪造成果；缺内容或文件验证失败就继续或失败。" : "",
+        hasLocalFileReference(messagesToText(messages))
+          ? "本地文件/目录只读取证: type local_read，toolWorker 为 files，modelPool 为 free，要求 path/exists/size、目录 inventory 和文本摘录 evidence；不要用 web_read，也不要让 codex-cli 代读文件。"
+          : "",
         needsLocalExecution
           ? "只有真实浏览器自动化或本地电脑自动化 worker 才用 codex-cli；公开联网取证用 web tool，文档渲染用 document tool。"
           : "如果不需要真实本地执行，避免使用 codex-cli。",

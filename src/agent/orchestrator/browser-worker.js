@@ -190,19 +190,12 @@ async function runBrowserWorker(task = {}, config = {}) {
 
 function shouldUseBrowserWorker(task = {}) {
   const type = String(task.type || "").toLowerCase();
+  const toolWorker = String(task.toolWorker || task.tool_worker || "").toLowerCase();
+  if (toolWorker === "browser") return true;
   if (String(task.modelPool || "").toLowerCase() === "codex-cli") return false;
   if (/^(web_search|web_read|web_fetch|api_read|http_fetch|public_web_read|public_api_read)$/.test(type)) return false;
   if (type === "browser" || type === "browser_read" || type === "page_read") return true;
-  if (
-    /^(planning|plan|strategy|review|verification|final|summary|analysis)$/i.test(type) ||
-    /^(commander|planner|review)$/i.test(String(task.modelPool || ""))
-  ) {
-    return false;
-  }
-  const text = taskText(task);
-  const hasReadIntent =
-    /\b(open|read|extract|navigate|summarize)\b/i.test(text) || /打开|读取|提取|浏览|总结|摘要/i.test(text);
-  return Boolean(extractUrl(task) && hasReadIntent && /browser|page|web|url|网页|浏览器|页面/i.test(text));
+  return false;
 }
 
 module.exports = {

@@ -67,7 +67,7 @@ function normalizePromptSettings(raw, defaults = DEFAULT_PROMPT_SETTINGS) {
 
 function isCommanderGradeModel(model) {
   const id = String(model || "").toLowerCase();
-  return id === "gpt5.5" || id.includes("gpt-5") || id.includes("codex-xhigh") || id.includes("cx/gpt-");
+  return id === "gpt5.5" || id.includes("gpt-5");
 }
 
 function cleanModelPoolsForTier(modelPools, defaults = DEFAULT_MODEL_POOLS) {

@@ -262,6 +262,7 @@ function serializeGoal(goal) {
     goalId: goal.goalId,
     status: goal.status || "",
     blockedReason: goal.blockedReason || "",
+    output: compactText(goal.output || "", 50000),
     recoverySummary: goal.recoverySummary ? clone(goal.recoverySummary) : null,
     createdAt: goal.createdAt,
     updatedAt: goal.updatedAt,
@@ -287,6 +288,7 @@ function hydrateGoal(raw = {}) {
     goalId: String(raw.goalId || raw.goal_id || "default-goal"),
     status: String(raw.status || raw.goalStatus || raw.goal_status || ""),
     blockedReason: String(raw.blockedReason || raw.blocked_reason || ""),
+    output: compactText(raw.output || raw.finalAnswer || raw.final_answer || "", 50000),
     recoverySummary:
       raw.recoverySummary || raw.recovery_summary ? clone(raw.recoverySummary || raw.recovery_summary) : null,
     createdAt: raw.createdAt || raw.created_at || nowIso(),
@@ -382,6 +384,7 @@ function ensureGoal(goalId) {
       goalId: id,
       status: "running",
       blockedReason: "",
+      output: "",
       recoverySummary: null,
       createdAt: nowIso(),
       updatedAt: nowIso(),
@@ -595,6 +598,7 @@ function publicGoal(goal) {
     goalId: goal.goalId,
     status: goal.status || "",
     blockedReason: goal.blockedReason || "",
+    output: compactText(goal.output || "", 50000),
     recoverySummary: goal.recoverySummary ? clone(goal.recoverySummary) : null,
     createdAt: goal.createdAt,
     updatedAt: goal.updatedAt,
@@ -618,6 +622,9 @@ function setGoalStatus(goalId, status, context = {}) {
   if (status) goal.status = String(status);
   if (Object.prototype.hasOwnProperty.call(context, "blockedReason")) {
     goal.blockedReason = String(context.blockedReason || "");
+  }
+  if (Object.prototype.hasOwnProperty.call(context, "output")) {
+    goal.output = compactText(context.output || "", 50000);
   }
   if (context.recoverySummary && typeof context.recoverySummary === "object") {
     goal.recoverySummary = clone(context.recoverySummary);
@@ -1244,54 +1251,11 @@ function applyVerificationResult(goalId, taskId, verification, context = {}) {
   return { task: publicTask(task), verification: compact };
 }
 
-function verificationRiskEvaluation(verification = {}) {
-  const findings = Array.isArray(verification.riskFindings) ? verification.riskFindings : [];
-  if (!findings.length) return null;
-  const levels = findings.map((finding) => finding.riskLevel || "medium");
-  const riskLevel = riskEngine.maxRiskLevel(...levels);
-  const reasons = findings.map((finding) => finding.reason || finding.blockedReason).filter(Boolean);
-  const blockedReason =
-    findings.find((finding) => finding.blockedReason)?.blockedReason ||
-    (riskLevel === "critical" ? reasons[0] || "Verification detected critical risk." : "");
-  return {
-    at: nowIso(),
-    phase: "verification",
-    riskLevel,
-    riskReasons: reasons,
-    requiresHumanApproval: !blockedReason && riskEngine.isRiskAtLeast(riskLevel, "high"),
-    approvalReason:
-      !blockedReason && riskEngine.isRiskAtLeast(riskLevel, "high")
-        ? reasons[0] || "Verification detected high risk."
-        : "",
-    approvalStatus:
-      !blockedReason && riskEngine.isRiskAtLeast(riskLevel, "high")
-        ? riskEngine.APPROVAL_STATUS.PENDING
-        : riskEngine.APPROVAL_STATUS.NOT_REQUIRED,
-    escalationReason: reasons[0] || "",
-    suggestedAction: blockedReason
-      ? "block"
-      : riskEngine.isRiskAtLeast(riskLevel, "high")
-        ? "request_human_approval"
-        : "proceed_with_caution",
-    blockedReason,
-    riskSignals: findings.map((finding) => ({
-      source: "verification",
-      riskLevel: riskEngine.normalizeRiskLevel(finding.riskLevel || riskLevel),
-      reason: String(finding.reason || finding.blockedReason || "Verification risk finding"),
-      details: finding.details || {}
-    }))
-  };
-}
-
 function nextStatusFromVerification(task = {}, verification = {}) {
-  if (verification.suggestedNextState === verificationEngine.SUGGESTED_NEXT_STATE.BLOCKED) return TASK_STATUS.BLOCKED;
-  if (verification.suggestedNextState === verificationEngine.SUGGESTED_NEXT_STATE.WAITING_HUMAN)
-    return TASK_STATUS.WAITING_HUMAN;
   if (verification.suggestedNextState === verificationEngine.SUGGESTED_NEXT_STATE.COMPLETED)
     return TASK_STATUS.COMPLETED;
   if (verification.suggestedNextState === verificationEngine.SUGGESTED_NEXT_STATE.NEEDS_EVIDENCE)
     return TASK_STATUS.NEEDS_EVIDENCE;
-  if (verification.suggestedNextState === verificationEngine.SUGGESTED_NEXT_STATE.FAILED) return TASK_STATUS.FAILED;
   if (verification.retryable !== false && Number(task.attempts || 0) < Number(task.maxAttempts || 1)) {
     return TASK_STATUS.RETRY_READY;
   }
@@ -1306,8 +1270,6 @@ function transitionReasonFromVerification(status, verification = {}) {
   }
   if (status === TASK_STATUS.RETRY_READY) return "verification_retry";
   if (status === TASK_STATUS.NEEDS_EVIDENCE) return "verification_needs_evidence";
-  if (status === TASK_STATUS.BLOCKED) return "verification_blocked";
-  if (status === TASK_STATUS.WAITING_HUMAN) return "verification_waiting_human";
   return "verification_failed";
 }
 
@@ -1317,6 +1279,14 @@ function isReadOnlyEvidenceCollectionTask(task = {}) {
   if (
     toolWorker === "web" ||
     /^(web_search|web_read|web_fetch|api_read|http_fetch|public_web_read|public_api_read)$/.test(type)
+  ) {
+    return true;
+  }
+  if (
+    toolWorker === "files" ||
+    /^(local_read|file_read|files_read|filesystem_read|directory_read|project_read|repo_read|repository_read)$/.test(
+      type
+    )
   ) {
     return true;
   }
@@ -1335,6 +1305,13 @@ function evidenceKindForTask(task = {}) {
   const type = String(task.type || task.taskType || "").toLowerCase();
   const toolWorker = String(task.toolWorker || task.tool_worker || "").toLowerCase();
   const modelPool = String(task.modelPool || task.model_pool || "").toLowerCase();
+  if (
+    toolWorker === "files" ||
+    /^(local_read|file_read|files_read|filesystem_read|directory_read|project_read|repo_read|repository_read)$/.test(
+      type
+    )
+  )
+    return "local_file";
   if (/^(shell|terminal|command|local_execution)$/.test(type) || modelPool === "codex-cli") return "shell_execution";
   if (type === "web_search") return "web_search_result";
   if (type === "api_read" || type === "public_api_read" || type === "http_fetch") return "api_response";
@@ -1346,6 +1323,7 @@ function evidenceKindForTask(task = {}) {
 function evidenceFieldsForKind(kind = "") {
   if (kind === "web_search_result" || kind === "web_page") return ["url", "status", "title", "text", "timestamp"];
   if (kind === "api_response") return ["url", "status", "body", "timestamp"];
+  if (kind === "local_file") return ["path", "exists", "size", "text", "timestamp"];
   if (kind === "shell_execution") return ["command", "exitCode", "stdout", "stderr", "timestamp"];
   if (kind === "browser_observation") return ["url", "title", "visibleText", "timestamp"];
   return ["summary", "claims", "timestamp"];
@@ -1674,40 +1652,6 @@ function applyWorkerResult(goalId, taskId, workerResult, context = {}) {
       ...mergedContext,
       source: "verification_engine"
     });
-    const verificationRisk = verificationRiskEvaluation(verificationApplied.verification);
-    if (verificationRisk) {
-      const appliedRisk = applyRiskEvaluation(goalId, taskId, verificationRisk, {
-        ...mergedContext,
-        phase: "verification"
-      });
-      const riskStatus = riskGateStatus(appliedRisk.evaluation, getTask(goalId, taskId));
-      if (riskStatus === TASK_STATUS.BLOCKED) {
-        const current = getTask(goalId, taskId);
-        current.blockedReason =
-          appliedRisk.evaluation.blockedReason ||
-          verificationApplied.verification.detectedIssues[0]?.issue ||
-          "Verification detected risk.";
-        saveStore();
-        return transitionTask(goalId, taskId, TASK_STATUS.BLOCKED, "verification_blocked", {
-          ...mergedContext,
-          verification: verificationApplied.verification,
-          riskEvaluation: appliedRisk.evaluation
-        });
-      }
-      if (riskStatus === TASK_STATUS.WAITING_HUMAN) {
-        const current = getTask(goalId, taskId);
-        current.approvalReason = appliedRisk.evaluation.approvalReason || "Verification detected high risk.";
-        current.approvalStatus = riskEngine.APPROVAL_STATUS.PENDING;
-        current.requiresHumanApproval = true;
-        current.requiresHumanConfirmation = true;
-        saveStore();
-        return transitionTask(goalId, taskId, TASK_STATUS.WAITING_HUMAN, "verification_waiting_human", {
-          ...mergedContext,
-          verification: verificationApplied.verification,
-          riskEvaluation: appliedRisk.evaluation
-        });
-      }
-    }
     const current = getTask(goalId, taskId);
     const nextStatus = nextStatusFromVerification(current, verificationApplied.verification);
     if (nextStatus === TASK_STATUS.RETRY_READY) {
@@ -1731,11 +1675,6 @@ function applyWorkerResult(goalId, taskId, workerResult, context = {}) {
           budgetEvaluation: retryBudget.evaluation
         });
       }
-    }
-    if (nextStatus === TASK_STATUS.BLOCKED) {
-      current.blockedReason =
-        verificationApplied.verification.detectedIssues[0]?.issue || "Verification blocked task completion.";
-      saveStore();
     }
     return transitionTask(
       goalId,

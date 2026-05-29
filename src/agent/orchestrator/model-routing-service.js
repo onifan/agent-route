@@ -3,18 +3,15 @@
 const budgetGovernor = require("../budget");
 const planner = require("./planner");
 const configLoader = require("../../config/loader");
-const providerSettings = require("../../core/providers");
+const modelApiSettings = require("../../core/model-api-settings");
 
-const { DEFAULT_COMMANDER_MODELS, DEFAULT_CONFIG, dedupeModelPoolsByTier, loadRuntimeConfig, uniqueModels } =
-  configLoader;
-
-let dynamicFreeCache = { expiresAt: 0, models: [] };
+const { DEFAULT_COMMANDER_MODELS, dedupeModelPoolsByTier, loadRuntimeConfig, uniqueModels } = configLoader;
 
 function commanderModelAlias(model) {
   const id = String(model || "")
     .trim()
     .toLowerCase();
-  if (/^(?:cx|codex)\/gpt-?5\.5$/.test(id) || /^gpt-?5\.5$/.test(id)) return "gpt5.5";
+  if (/^(?:cx|codex|local|openai)\/gpt-?5\.5$/.test(id) || /^gpt-?5\.5$/.test(id)) return "gpt5.5";
   return id;
 }
 
@@ -32,80 +29,34 @@ function configuredCommanderModelsFromEnv() {
   ).filter((model) => model === "gpt5.5");
 }
 
-function modelIdFromProviderModel(connection, model) {
-  const id = String((model && model.id) || model || "").trim();
-  if (!id) return "";
-  if (id.includes("/")) return id;
-  const prefix = String(connection.providerAlias || connection.provider || "").trim();
-  return prefix ? `${prefix}/${id}` : id;
-}
-
-function isUsableProviderConnection(connection) {
-  if (!connection || connection.isActive === false) return false;
-  if (String(connection.authType || "").toLowerCase() !== "apikey") return false;
-  if (!connection.hasApiKey && !connection.hasOAuthToken) return false;
-  const status = String(connection.testStatus || "").toLowerCase();
-  return !["unavailable", "invalid", "failed", "error", "disabled"].includes(status);
-}
-
-function isUsableCodexOAuthConnection(connection) {
-  if (!connection || connection.isActive === false) return false;
-  if (String(connection.provider || "").toLowerCase() !== "codex") return false;
-  if (String(connection.authType || "").toLowerCase() !== "oauth") return false;
-  if (!connection.hasOAuthToken) return false;
-  const status = String(connection.testStatus || "").toLowerCase();
-  return !["unavailable", "invalid", "failed", "error", "disabled"].includes(status);
-}
-
 function activeProviderModelPools() {
-  let status = null;
-  try {
-    status = providerSettings.providerStatus();
-  } catch {
-    return {};
-  }
-  if (!status || !Array.isArray(status.connections)) return {};
-  const pools = { commander: [], strong: [], coding: [], free: [] };
-  for (const connection of status.connections) {
-    if (isUsableCodexOAuthConnection(connection)) {
-      const models = connection.defaultModel ? [{ id: connection.defaultModel }] : connection.models || [];
-      for (const model of models) {
-        const id = modelIdFromProviderModel(connection, model);
-        if (id && isAllowedCommanderModel(id)) pools.commander.push(id);
-      }
-      continue;
-    }
-    if (!isUsableProviderConnection(connection)) continue;
-    const provider = String(connection.provider || "").toLowerCase();
-    if (provider === "openrouter") continue;
-    const models = connection.defaultModel ? [{ id: connection.defaultModel }] : connection.models || [];
-    for (const model of models) {
-      const id = modelIdFromProviderModel(connection, model);
-      if (!id) continue;
-      const lower = id.toLowerCase();
-      if (/vision|embed|tts|image|audio/.test(lower)) continue;
-      pools.free.push(id);
-      if (/coder|code|chat|flash|mini|lite/.test(lower)) pools.coding.push(id);
-      if (/pro|reason|sonnet|opus|gpt-5|kimi|qwen|deepseek|glm/.test(lower)) pools.strong.push(id);
-    }
-  }
-  const sortByInteractiveCost = (models) =>
+  const pools = modelApiSettings.configuredModelPools();
+  const sortByCapability = (models) =>
     uniqueModels(models).sort((left, right) => activeProviderModelScore(left) - activeProviderModelScore(right));
   return {
-    commander: sortByInteractiveCost(pools.commander),
-    strong: sortByInteractiveCost(pools.strong),
-    coding: sortByInteractiveCost(pools.coding),
-    free: sortByInteractiveCost(pools.free)
+    commander: sortByCapability(pools.commander),
+    strong: sortByCapability(pools.strong),
+    coding: sortByCapability(pools.coding),
+    free: sortByCapability(pools.free)
   };
+}
+
+function capabilityTier(model) {
+  const id = String(model || "").toLowerCase();
+  if (/^(gpt5\.5|gpt-?5\.5)$/.test(id) || id.startsWith("openai/") || id.startsWith("claude/")) return 1;
+  if (id.startsWith("anthropic/")) return 1;
+  if (id.startsWith("gemini/") || id.startsWith("gc/") || id.startsWith("deepseek/")) return 2;
+  if (id.startsWith("glm/") || id.startsWith("zhipu/") || id.startsWith("bigmodel/")) return 3;
+  if (id.startsWith("qwen/") || id.startsWith("qw/")) return 3;
+  return 9;
 }
 
 function activeProviderModelScore(model) {
   const id = String(model || "").toLowerCase();
-  let score = 50;
-  if (/flash|turbo|haiku|mini|lite|small/.test(id)) score -= 30;
-  if (/chat|instruct/.test(id)) score -= 45;
-  if (/coder|code/.test(id)) score -= 5;
-  if (/pro|reason|thinking|opus/.test(id)) score += 30;
+  let score = capabilityTier(id) * 100;
+  if (/gpt5\.5|gpt-?5\.5|opus|sonnet|pro|reason|reasoner|thinking|max/.test(id)) score -= 20;
+  if (/coder|code/.test(id)) score -= 8;
+  if (/(^|[-_/])(flash|turbo|haiku|mini|lite|small|chat|instruct)([-_/]|$)/.test(id)) score += 12;
   return score;
 }
 
@@ -172,6 +123,13 @@ function loadConfig() {
 function freeModelScore(model) {
   const id = String(model || "").toLowerCase();
   const baseRules = [
+    ["gpt-5.5", 300],
+    ["gpt5.5", 300],
+    ["claude", 290],
+    ["gemini", 220],
+    ["deepseek", 210],
+    ["glm", 130],
+    ["qwen", 120],
     ["glm-4.5-air", 121],
     ["gpt-oss-120b", 120],
     ["gemini-3-flash", 118],
@@ -202,45 +160,9 @@ function freeModelScore(model) {
   return modifierRules.reduce((score, rule) => (id.includes(rule[0]) ? score + rule[1] : score), base);
 }
 
-async function fetchDynamicFreeModels(config) {
-  if (!config.dynamicFreeModels || typeof fetch !== "function") return [];
-  const now = Date.now();
-  if (dynamicFreeCache.expiresAt > now) return dynamicFreeCache.models;
-
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), Number(config.discoveryTimeoutMs || 2500));
-  try {
-    const response = await fetch(config.openRouterModelsEndpoint || DEFAULT_CONFIG.openRouterModelsEndpoint, {
-      headers: { Accept: "application/json" },
-      signal: controller.signal
-    });
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    const data = await response.json();
-    const models = uniqueModels(
-      (data.data || [])
-        .map((model) => model && model.id)
-        .filter((id) => typeof id === "string" && id.endsWith(":free"))
-        .map((id) => `openrouter/${id}`)
-    )
-      .sort((a, b) => freeModelScore(b) - freeModelScore(a) || a.localeCompare(b))
-      .slice(0, Number(config.maxFreeCandidates || DEFAULT_CONFIG.maxFreeCandidates));
-    dynamicFreeCache = { expiresAt: now + 10 * 60 * 1000, models };
-    return models;
-  } catch (err) {
-    dynamicFreeCache = { expiresAt: now + 60 * 1000, models: [] };
-    console.warn("[agent-route] dynamic free model discovery failed:", err.message);
-    return [];
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
 async function resolveConfig() {
   const config = loadConfig();
-  const dynamicFreeModels = await fetchDynamicFreeModels(config);
-  const free = uniqueModels([...dynamicFreeModels, ...(config.modelPools.free || [])]).sort(
-    (a, b) => freeModelScore(b) - freeModelScore(a)
-  );
+  const free = uniqueModels(config.modelPools.free || []).sort((a, b) => freeModelScore(b) - freeModelScore(a));
 
   return {
     ...config,
@@ -302,11 +224,10 @@ function modelsForTask(config, task, commanderRoute, budgetState = null) {
   });
 }
 
-function isFreeFallbackModel(model) {
+function isLowCostModel(model) {
   const id = String(model || "").toLowerCase();
   return (
     id.includes(":free") ||
-    id.startsWith("oc/") ||
     id.startsWith("gc/") ||
     id.includes("/gemini-3-flash") ||
     id.includes("/gemini-3.1-flash") ||
@@ -362,11 +283,10 @@ function resolveCommanderRoute(body, config) {
 module.exports = {
   applyActiveProviderModels,
   activeProviderModelPools,
-  fetchDynamicFreeModels,
   freeModelScore,
   getRequestedCommanderModel,
   isAllowedCommanderModel,
-  isFreeFallbackModel,
+  isLowCostModel,
   loadConfig,
   modelsForPool,
   modelsForTask,

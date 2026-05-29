@@ -11,7 +11,7 @@ function clampInteger(value, min, max) {
   return Math.max(min, Math.min(max, number));
 }
 
-function outputTokenLimit(config = {}, defaultConfig = {}, keys = [], fallback = 1600, min = 512, max = 5000) {
+function outputTokenLimit(config = {}, defaultConfig = {}, keys = [], defaultValue = 1600, min = 512, max = 5000) {
   for (const key of keys) {
     const value = finiteNumber(config[key]);
     if (value != null) return clampInteger(value, min, max);
@@ -20,7 +20,7 @@ function outputTokenLimit(config = {}, defaultConfig = {}, keys = [], fallback =
     const value = finiteNumber(defaultConfig[key]);
     if (value != null) return clampInteger(value, min, max);
   }
-  return clampInteger(fallback, min, max);
+  return clampInteger(defaultValue, min, max);
 }
 
 function planMaxTokens(config = {}, defaultConfig = {}) {

@@ -162,13 +162,13 @@ function estimateMessagesTokens(messages = []) {
 
 function modelTier(model = "") {
   const id = String(model || "").toLowerCase();
-  if (!id || id === "codex-cli" || id.includes(":free") || id.startsWith("oc/") || id.startsWith("gc/")) return "free";
+  if (!id || id === "codex-cli" || id.includes(":free") || id.startsWith("gc/")) return "free";
   if (
+    id === "gpt5.5" ||
     id.includes("gpt-5.5") ||
     id.includes("claude") ||
     id.includes("sonnet") ||
-    id.includes("gemini-3.1-pro") ||
-    id.includes("codex-xhigh")
+    id.includes("gemini-3.1-pro")
   )
     return "expensive";
   if (

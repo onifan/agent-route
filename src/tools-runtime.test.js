@@ -112,6 +112,12 @@ function testFilesTool() {
   assert.equal(hash.hash.length, 64);
   const read = filesTool.readTextFile(tempPath);
   assert.equal(read.content, "abc");
+  const listed = filesTool.listDirectory(path.dirname(tempPath));
+  assert.equal(listed.ok, true);
+  assert.ok(listed.entries.some((entry) => entry.path === tempPath));
+  const found = filesTool.findFiles(path.dirname(tempPath), { maxFiles: 20, maxDepth: 2 });
+  assert.equal(found.ok, true);
+  assert.ok(found.files.some((entry) => entry.path === tempPath));
 }
 
 async function testBrowserMockToolReturnsEvidence() {

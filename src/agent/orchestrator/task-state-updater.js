@@ -114,7 +114,8 @@ function applyWorkerResultAndPublish({
     source: "agent_route_worker",
     model: result.model || "",
     elapsedMs: result.elapsedMs || 0,
-    budgetPolicy: config.budget
+    budgetPolicy: config.budget,
+    verificationPolicy: config.verificationPolicy
   });
   const generatedMemories = memoryRuntime.captureTaskMemory({
     goalId,
@@ -207,7 +208,8 @@ function applyWorkerResultAndPublish({
       source: "agent_route_worker",
       model: result.model || "",
       attempt: updatedTask.attempts,
-      budgetPolicy: config.budget
+      budgetPolicy: config.budget,
+      verificationPolicy: config.verificationPolicy
     });
     const retryBudget = latest(updatedTask.budgetHistory);
     if (retryBudget) emitBudget("retry_budget", retryBudget, updatedTask);

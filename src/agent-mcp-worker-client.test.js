@@ -1,6 +1,9 @@
 "use strict";
 
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const os = require("node:os");
+const path = require("node:path");
 
 const workerMcpClient = require("./agent/mcp/client");
 
@@ -10,6 +13,7 @@ async function main() {
   assert.ok(toolNames.includes(workerMcpClient.WORKER_MCP_TOOLS.document));
   assert.ok(toolNames.includes(workerMcpClient.WORKER_MCP_TOOLS.web));
   assert.ok(toolNames.includes(workerMcpClient.WORKER_MCP_TOOLS.browser));
+  assert.ok(toolNames.includes(workerMcpClient.WORKER_MCP_TOOLS.files));
   assert.ok(toolNames.includes(workerMcpClient.WORKER_MCP_TOOLS.codex));
 
   const resource = await workerMcpClient.readWorkerResource();
@@ -28,6 +32,24 @@ async function main() {
   assert.equal(documentResult.ok, false);
   assert.equal(documentResult.model, "document-tool");
   assert.match(documentResult.error, /no upstream or explicit content/i);
+
+  const localProject = fs.mkdtempSync(path.join(os.tmpdir(), "agent-route-local-read-"));
+  fs.writeFileSync(path.join(localProject, "README.md"), "# Local Read Test\n\nhello files worker");
+  fs.mkdirSync(path.join(localProject, "src"));
+  fs.writeFileSync(path.join(localProject, "src", "index.js"), "console.log('local read');\n");
+  const localReadResult = await workerMcpClient.callWorkerTool(workerMcpClient.WORKER_MCP_TOOLS.files, {
+    task: {
+      id: "local-read",
+      type: "local_read",
+      toolWorker: "files",
+      input: localProject
+    },
+    config: {}
+  });
+  assert.equal(localReadResult.ok, true);
+  assert.equal(localReadResult.model, "files-tool");
+  assert.match(localReadResult.content, /Local directory/);
+  assert.match(localReadResult.content, /README\.md/);
 
   const forwardedLogs = [];
   const codexResult = await workerMcpClient.callWorkerTool(

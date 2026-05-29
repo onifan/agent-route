@@ -37,6 +37,40 @@ function hasIndependentEvidence(rawEvidence = {}) {
   ].some(hasEntries);
 }
 
+function isSemanticModelTask(task = {}) {
+  const type = String(task.type || task.taskType || "").toLowerCase();
+  const pool = String(task.modelPool || task.model_pool || "").toLowerCase();
+  const toolWorker = String(task.toolWorker || task.tool_worker || "").toLowerCase();
+  if (toolWorker || pool === "codex-cli") return false;
+  if (
+    /^(web_search|web_read|web_fetch|api_read|http_fetch|local_read|file_read|files_read|filesystem_read|directory_read|project_read|repo_read|repository_read|browser|shell|terminal|command|local_execution|document|document_generate|document_render|file_generate|artifact_generate|planning|plan|strategy|review|verification|final)$/i.test(
+      type
+    )
+  ) {
+    return false;
+  }
+  return (
+    !type ||
+    /^(analysis|summary|summarize|proposal|writing|draft|report|research|content|extraction|classification|decision|general|answer|synthesis)$/i.test(
+      type
+    )
+  );
+}
+
+function hasCompleteSemanticEvidence(rawEvidence = {}) {
+  if (!isObject(rawEvidence)) return false;
+  const semantic = isObject(rawEvidence.semantic) ? rawEvidence.semantic : {};
+  const summary = String(
+    semantic.outputSummary || semantic.output_summary || semantic.summary || rawEvidence.summary || ""
+  ).trim();
+  const coverage = Number(semantic.criteriaCoverage ?? semantic.criteria_coverage);
+  const quality = Number(semantic.qualityScore ?? semantic.quality_score);
+  const addressesCriteria = semantic.addressesCriteria === true || semantic.addresses_criteria === true;
+  return Boolean(
+    summary && addressesCriteria && Number.isFinite(coverage) && coverage > 0 && Number.isFinite(quality) && quality > 0
+  );
+}
+
 function evidenceClaims(rawEvidence = {}) {
   if (!isObject(rawEvidence)) return [];
   return []
@@ -60,7 +94,7 @@ function modelClaimEvidence(output, resultType = "model_output", claims = []) {
   };
 }
 
-function evidenceInput(rawEvidence, output, resultType = "model_output") {
+function evidenceInput(rawEvidence, output, resultType = "model_output", task = {}) {
   const summary = String(output || "").trim();
   if (
     rawEvidence &&
@@ -69,6 +103,7 @@ function evidenceInput(rawEvidence, output, resultType = "model_output") {
     Object.keys(rawEvidence).length
   ) {
     if (hasIndependentEvidence(rawEvidence)) return rawEvidence;
+    if (isSemanticModelTask(task) && hasCompleteSemanticEvidence(rawEvidence)) return rawEvidence;
     const semantic = rawEvidence.semantic && typeof rawEvidence.semantic === "object" ? rawEvidence.semantic : {};
     return modelClaimEvidence(
       semantic.outputSummary ||
@@ -111,12 +146,15 @@ function makeWorkerRuntimeResult(result, runningTask) {
       : hasIndependentEvidence(result && result.evidence)
         ? result.evidence
         : parsed.evidence || (result && result.evidence);
-    const evidence = workerEvidence.normalizeEvidence(evidenceInput(rawEvidence, output, "structured_worker_output"), {
-      context: parsed.context || {},
-      artifacts: Array.isArray(parsed.artifacts) ? parsed.artifacts : [],
-      actions: Array.isArray(parsed.actions) ? parsed.actions : [],
-      output
-    });
+    const evidence = workerEvidence.normalizeEvidence(
+      evidenceInput(rawEvidence, output, "structured_worker_output", runningTask),
+      {
+        context: parsed.context || {},
+        artifacts: Array.isArray(parsed.artifacts) ? parsed.artifacts : [],
+        actions: Array.isArray(parsed.actions) ? parsed.actions : [],
+        output
+      }
+    );
     const evidenceContext = workerEvidence.evidenceToContext(evidence);
     return {
       ...parsed,
@@ -155,35 +193,38 @@ function makeWorkerRuntimeResult(result, runningTask) {
       }
     };
   }
-  const fallbackOutput = !result.ok && isCodexCliResult && result.error ? result.error : result.content || "";
-  const fallbackEvidence = workerEvidence.normalizeEvidence(evidenceInput(result.evidence, fallbackOutput), {
-    context: {
-      exitCode: result.code,
-      code: result.code,
-      signal: result.signal,
-      timedOut: Boolean(result.timedOut),
-      stdout: isCodexCliResult ? "" : result.stdout || "",
-      stderr: isCodexCliResult ? "" : result.stderr || ""
-    },
-    artifacts: result.artifacts || [],
-    actions: [`called:${result.model || runningTask.modelPool}`],
-    output: fallbackOutput
-  });
-  const fallbackEvidenceContext = workerEvidence.evidenceToContext(fallbackEvidence);
+  const normalizedOutput = !result.ok && isCodexCliResult && result.error ? result.error : result.content || "";
+  const normalizedEvidence = workerEvidence.normalizeEvidence(
+    evidenceInput(result.evidence, normalizedOutput, "model_output", runningTask),
+    {
+      context: {
+        exitCode: result.code,
+        code: result.code,
+        signal: result.signal,
+        timedOut: Boolean(result.timedOut),
+        stdout: isCodexCliResult ? "" : result.stdout || "",
+        stderr: isCodexCliResult ? "" : result.stderr || ""
+      },
+      artifacts: result.artifacts || [],
+      actions: [`called:${result.model || runningTask.modelPool}`],
+      output: normalizedOutput
+    }
+  );
+  const normalizedEvidenceContext = workerEvidence.evidenceToContext(normalizedEvidence);
   return {
     kind: protocol.KIND.WORKER_RESULT,
     schemaVersion: protocol.PROTOCOL_VERSION,
     status: result.ok ? WORKER_OUTCOME.SUCCESS : WORKER_OUTCOME.FAILURE,
     actions: [`called:${result.model || runningTask.modelPool}`],
-    output: fallbackOutput,
+    output: normalizedOutput,
     error: result.error || "",
     nextStep: result.ok ? "" : "Retry with the next available model pool candidate or escalate to the commander.",
     artifacts: result.artifacts || [],
-    evidence: fallbackEvidence,
+    evidence: normalizedEvidence,
     memoryCandidates: [],
     verification: null,
     context: {
-      ...fallbackEvidenceContext,
+      ...normalizedEvidenceContext,
       model: result.model || "",
       elapsedMs: result.elapsedMs || 0,
       exitCode: result.code,

@@ -20,10 +20,9 @@
 在 loopback 绑定之上的第二层。`checkRequestAuth` 的判定顺序：
 
 1. 若 `AGENT_ROUTE_DISABLE_LOCAL_AUTH=1` → 放行。
-2. 若 `AGENT_ROUTE_UPSTREAM_FORWARD_AUTH=true`（鉴权委托上游）→ 放行。
-3. 若没有任何启用的本地 API key → 放行（依赖 loopback 绑定，避免把新装用户锁在门外）。
-4. 否则：仅放行同源请求（本地 Web 控制台），或携带有效 active key 的请求（`Authorization: Bearer <key>` 或 `X-API-Key`）。
-5. 其余返回 `401 missing_or_invalid_api_key`。
+2. 若没有任何启用的本地 API key → 放行（依赖 loopback 绑定，避免把新装用户锁在门外）。
+3. 否则：仅放行同源请求（本地 Web 控制台），或携带有效 active key 的请求（`Authorization: Bearer <key>` 或 `X-API-Key`）。
+4. 其余返回 `401 missing_or_invalid_api_key`。
 
 active key 从本地数据库 `apiKeys` 表（`isActive = 1`）读取，带 30 秒缓存。若 `better-sqlite3` 不可用导致无法读取 key，会"fail open"——退回到仅依赖 loopback 绑定，而不是把用户锁死。生成 key 见 [开发与运维](development.md)。
 

@@ -25,7 +25,7 @@ async function runInitialPlanning({
   appendTasks,
   taskSummary,
   startedAt,
-  callWithFallback,
+  callRoutedModel,
   persistGoalBudget,
   normalizePromptSettings
 }) {
@@ -43,7 +43,7 @@ async function runInitialPlanning({
     candidates: commanderRoute.models.slice(0, 5)
   });
 
-  const planAttempt = await callWithFallback({
+  const planAttempt = await callRoutedModel({
     req,
     nextHandler,
     baseBody: {
@@ -65,7 +65,7 @@ async function runInitialPlanning({
         ...data,
         task: taskSummary(planTask)
       }),
-    responseFormatKind: protocol.KIND.PLAN,
+    functionCallKind: protocol.KIND.PLAN,
     validateContent: (content) => {
       const parsed = planner.parsePlannerContent(content);
       return parsed
@@ -107,7 +107,7 @@ async function runInitialPlanning({
 
   if (!planAttempt.ok) {
     const message = `Commander could not create a plan: ${planAttempt.error || "unknown error"}`;
-    taskRuntime.setGoalStatus(goalId, TASK_STATUS.FAILED, { blockedReason: message });
+    taskRuntime.setGoalStatus(goalId, TASK_STATUS.FAILED, { blockedReason: message, output: message });
     send("error", {
       message,
       phase: "plan",
@@ -120,7 +120,7 @@ async function runInitialPlanning({
 
   if (!parsedPlan) {
     const message = "Commander returned an invalid or empty plan.";
-    taskRuntime.setGoalStatus(goalId, TASK_STATUS.FAILED, { blockedReason: message });
+    taskRuntime.setGoalStatus(goalId, TASK_STATUS.FAILED, { blockedReason: message, output: message });
     send("error", {
       message,
       phase: "plan",
@@ -136,7 +136,7 @@ async function runInitialPlanning({
   const registeredPlanTasks = appendTasks(plan.tasks, "commander");
   if (!registeredPlanTasks.length) {
     const message = "Strategic layer blocked the planner output because no strategy-compliant task remained.";
-    taskRuntime.setGoalStatus(goalId, TASK_STATUS.BLOCKED, { blockedReason: message });
+    taskRuntime.setGoalStatus(goalId, TASK_STATUS.BLOCKED, { blockedReason: message, output: message });
     send("pause", {
       goal_id: goalId,
       status: TASK_STATUS.BLOCKED,

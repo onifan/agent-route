@@ -10,7 +10,6 @@ process.env.AGENT_ROUTE_TASKS = testStore;
 
 const runtime = require("./agent-route-task-runtime");
 const actionApi = require("./agent/orchestrator/action-api");
-const taskExecutor = require("./agent/orchestrator/task-executor");
 const budgetGovernor = require("./agent-route-budget-governor");
 const strategyEngine = require("./agent-route-strategy-engine");
 const verificationEngine = require("./agent-route-verification-engine");
@@ -326,7 +325,7 @@ async function testActionApiListPayloadsAreCompact() {
   assert.doesNotMatch(goalsSerialized, /api-body-tail-marker/);
 }
 
-async function testActionApiDerivesFailedGoalStatusFromTasks() {
+async function testActionApiPreservesStoredGoalStatus() {
   reset();
   const goalId = "goal-derived-failed-status";
   runtime.registerGoalTasks(
@@ -344,8 +343,37 @@ async function testActionApiDerivesFailedGoalStatusFromTasks() {
   const goal = json.goals.find((item) => item.goalId === goalId);
 
   assert.equal(response.status, 200);
-  assert.equal(goal.status, TASK_STATUS.FAILED);
-  assert.match(goal.blockedReason, /所有任务都失败/);
+  assert.equal(goal.status, TASK_STATUS.RUNNING);
+  assert.equal(goal.blockedReason, "");
+}
+
+async function testActionApiDoesNotDeriveGoalStatusFromTasks() {
+  reset();
+  const goalId = "goal-stale-blocked-status";
+  runtime.registerGoalTasks(
+    goalId,
+    [
+      {
+        id: "collect-more-evidence",
+        title: "Collect more evidence",
+        status: TASK_STATUS.NEEDS_EVIDENCE,
+        attempts: 1,
+        maxAttempts: 2
+      }
+    ],
+    { replace: true, source: "test" }
+  );
+  runtime.setGoalStatus(goalId, TASK_STATUS.BLOCKED, {
+    blockedReason: "旧的最终答案门控阻塞原因。"
+  });
+
+  const response = await actionApi.handleAgentRouteAction({ action: "list_goals" });
+  const json = await response.json();
+  const goal = json.goals.find((item) => item.goalId === goalId);
+
+  assert.equal(response.status, 200);
+  assert.equal(goal.status, TASK_STATUS.BLOCKED);
+  assert.equal(goal.blockedReason, "旧的最终答案门控阻塞原因。");
 }
 
 function testDangerousShellIsBlockedAfterWorker() {
@@ -698,7 +726,7 @@ function testVerificationBlockedAndRiskEscalated() {
   assert.equal(blocked.status, TASK_STATUS.BLOCKED);
   assert.equal(blocked.riskLevel, "critical");
   assert.match(blocked.blockedReason, /unexpected file deletion/i);
-  assert.ok(blocked.riskHistory.some((entry) => entry.phase === "verification"));
+  assert.ok(blocked.riskHistory.some((entry) => entry.phase === "after"));
 }
 
 function testTaskDoesNotCompleteOnThinSuccess() {
@@ -842,7 +870,7 @@ function testGoalBudgetPersistsAcrossReload() {
     {
       tokenUsage: { prompt: 25, completion: 10, total: 35 },
       browserActions: 2,
-      model: "openrouter/qwen/qwen3-32b:free"
+      model: "qwen/qwen-plus:free"
     },
     { phase: "test" }
   );
@@ -982,8 +1010,8 @@ function testUnlimitedBudgetDoesNotBlockOrDowngrade() {
   assert.equal(evaluation.status, "ok");
   assert.equal(evaluation.unlimited, true);
   assert.equal(evaluation.blockedReason, "");
-  const routed = budgetGovernor.routeModels(["cx/gpt-5.5", "openrouter/qwen/qwen3-32b:free"], { budgetState: state });
-  assert.equal(routed[0], "cx/gpt-5.5");
+  const routed = budgetGovernor.routeModels(["gpt5.5", "qwen/qwen-plus:free"], { budgetState: state });
+  assert.equal(routed[0], "gpt5.5");
   assert.equal(budgetGovernor.shouldUseVerifierModel({ budgetState: state, policy: state.policy }), true);
 }
 
@@ -994,15 +1022,12 @@ function testBudgetModelDowngrade() {
     startedAt: Date.now()
   });
   budgetGovernor.recordGoalUsage(state, { tokenUsage: { prompt: 90, completion: 0, total: 90 } }, { phase: "test" });
-  const routed = budgetGovernor.routeModels(
-    ["cx/gpt-5.5", "openrouter/google/gemini-2.5-pro", "openrouter/qwen/qwen3-32b:free"],
-    {
-      budgetState: state,
-      task: { id: "extract", type: "extraction", riskLevel: "low", difficulty: "low" }
-    }
-  );
-  assert.equal(routed[0], "openrouter/qwen/qwen3-32b:free");
-  assert.ok(!routed.includes("cx/gpt-5.5"));
+  const routed = budgetGovernor.routeModels(["gpt5.5", "gemini/gemini-2.5-pro", "qwen/qwen-plus:free"], {
+    budgetState: state,
+    task: { id: "extract", type: "extraction", riskLevel: "low", difficulty: "low" }
+  });
+  assert.equal(routed[0], "qwen/qwen-plus:free");
+  assert.ok(!routed.includes("gpt5.5"));
 }
 
 function testVerificationRetryBudgetBlocks() {
@@ -1756,9 +1781,9 @@ function testBlockedPropagation() {
   assert.match(downstream.blockedReason, /Dependency fetch is blocked/);
 }
 
-async function testReadyDrainContinuesAfterDependencyPropagationBlock() {
+function testReadySelectionContinuesAfterDependencyPropagationBlock() {
   reset();
-  const goalId = "goal-drain-propagation";
+  const goalId = "goal-ready-selection-propagation";
   runtime.registerGoalTasks(
     goalId,
     [
@@ -1768,55 +1793,35 @@ async function testReadyDrainContinuesAfterDependencyPropagationBlock() {
     ],
     { replace: true, source: "test" }
   );
-  const allTasks = runtime.listTasks(goalId);
-  const executedTaskIds = new Set();
-  const runOrder = [];
-  const syncRuntimeTasks = () => {
-    const latest = runtime.listTasks(goalId);
-    for (const task of latest) {
-      const index = allTasks.findIndex((item) => item.id === task.id);
-      if (index >= 0) allTasks[index] = task;
-      else allTasks.push(task);
-    }
-    return latest;
-  };
-  const result = await taskExecutor.drainReadyTasks({
-    goalId,
-    iteration: 1,
-    config: { maxTasks: 2 },
-    defaultConfig: { maxTasks: 2 },
-    executedTaskIds,
-    allTasks,
-    syncRuntimeTasks,
-    emitGraph: () => runtime.getExecutionGraph(goalId),
-    trace: [],
-    runWorkerTask: async (task) => {
-      runOrder.push(task.id);
-      runtime.startTask(goalId, task.id, { reason: "start" });
-      if (task.id === "independent") {
-        const updated = runtime.applyWorkerResult(goalId, task.id, {
-          status: WORKER_OUTCOME.SUCCESS,
-          output: "Independent lookup returned valid evidence.",
-          evidence: semanticEvidence("Independent lookup returned valid evidence.")
-        });
-        syncRuntimeTasks();
-        executedTaskIds.add(task.id);
-        return { task: updated, status: updated.status, ok: true, content: updated.result };
-      }
-      const updated = runtime.applyWorkerResult(goalId, task.id, {
-        status: WORKER_OUTCOME.FAILURE,
-        error: "Source API is unavailable."
-      });
-      syncRuntimeTasks();
-      executedTaskIds.add(task.id);
-      return { task: updated, status: updated.status, ok: false, error: updated.error };
-    }
+  assert.deepEqual(
+    runtime
+      .readyTasks(goalId)
+      .map((task) => task.id)
+      .sort(),
+    ["fetch", "independent"]
+  );
+  runtime.startTask(goalId, "fetch", { reason: "start" });
+  runtime.applyWorkerResult(goalId, "fetch", {
+    status: WORKER_OUTCOME.FAILURE,
+    error: "Source API is unavailable."
   });
-  assert.equal(result.pausedTask, null);
-  assert.deepEqual(runOrder.sort(), ["fetch", "independent"]);
   assert.equal(runtime.getTask(goalId, "verify").status, TASK_STATUS.BLOCKED);
   assert.match(runtime.getTask(goalId, "verify").blockedReason, /Dependency fetch is failed/);
-  assert.equal(executedTaskIds.has("verify"), false);
+  assert.deepEqual(
+    runtime
+      .readyTasks(goalId)
+      .map((task) => task.id)
+      .sort(),
+    ["independent"]
+  );
+  runtime.startTask(goalId, "independent", { reason: "start" });
+  runtime.applyWorkerResult(goalId, "independent", {
+    status: WORKER_OUTCOME.SUCCESS,
+    output: "Independent lookup returned valid evidence.",
+    evidence: semanticEvidence("Independent lookup returned valid evidence.")
+  });
+  assert.equal(runtime.getTask(goalId, "independent").status, TASK_STATUS.COMPLETED);
+  assert.equal(runtime.getTask(goalId, "verify").status, TASK_STATUS.BLOCKED);
 }
 
 function testDynamicGraphUpdate() {
@@ -1987,7 +1992,8 @@ async function main() {
   await testExecuteNextTaskRequiresWorker();
   await testExecuteNextTaskActionRequiresWorkerResult();
   await testActionApiListPayloadsAreCompact();
-  await testActionApiDerivesFailedGoalStatusFromTasks();
+  await testActionApiPreservesStoredGoalStatus();
+  await testActionApiDoesNotDeriveGoalStatusFromTasks();
   testDangerousShellIsBlockedAfterWorker();
   testRetryCountEscalatesRisk();
   testBrowserSubmitTriggersHumanApproval();
@@ -2033,7 +2039,7 @@ async function main() {
   testReadOnlyNewsSearchWithPublishTimestampDoesNotNeedApprovalDependency();
   testReadOnlyNewsSearchWithPublishUpdateDateDoesNotNeedApprovalDependency();
   testBlockedPropagation();
-  await testReadyDrainContinuesAfterDependencyPropagationBlock();
+  testReadySelectionContinuesAfterDependencyPropagationBlock();
   testDynamicGraphUpdate();
   testDynamicTasksDependingOnFailedTaskAreBlocked();
   testDeleteTaskRemovesTaskAndUpdatesGraph();

@@ -291,6 +291,17 @@ function isWebToolTask(task = {}) {
   return toolWorker === "web" || isWebToolType(type);
 }
 
+function isLocalReadTask(task = {}) {
+  const type = String(task.type || task.taskType || "").toLowerCase();
+  const toolWorker = String(task.toolWorker || task.tool_worker || "").toLowerCase();
+  return (
+    ["files", "file", "local_read", "filesystem"].includes(toolWorker) ||
+    /^(local_read|file_read|files_read|filesystem_read|directory_read|project_read|repo_read|repository_read)$/.test(
+      type
+    )
+  );
+}
+
 function isHighRiskTask(task = {}) {
   return /^(high|critical)$/i.test(String(task.riskLevel || task.risk_level || task.risk || ""));
 }
@@ -402,6 +413,12 @@ function filterNonExecutableSynthesisTasks(tasks = [], context = {}) {
 
 function normalizeAppenderTask(task = {}) {
   const normalized = { ...task };
+  if (isLocalReadTask(normalized) && !isHighRiskTask(normalized)) {
+    normalized.type = "local_read";
+    normalized.toolWorker = "files";
+    normalized.modelPool = "free";
+    if (!normalized.produces && !normalized.outputs) normalized.produces = ["local_file_evidence"];
+  }
   if (isWebToolTask(normalized) && !isHighRiskTask(normalized)) {
     normalized.type = webTaskTypeFor(normalized);
     normalized.toolWorker = "web";

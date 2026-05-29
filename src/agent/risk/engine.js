@@ -649,8 +649,11 @@ function extractBrowserActions(task = {}, workerResult = {}, context = {}) {
 function evaluateCapabilityRisk(state, task = {}) {
   const type = String(task.type || "").toLowerCase();
   const pool = String(task.modelPool || "").toLowerCase();
+  const toolWorker = String(task.toolWorker || task.tool_worker || "").toLowerCase();
   if (
-    (/(shell|terminal|local_execution|file|filesystem|codex-cli)/.test(type) || pool === "codex-cli") &&
+    (/(shell|terminal|local_execution|local_read|file|filesystem|codex-cli)/.test(type) ||
+      pool === "codex-cli" ||
+      toolWorker === "files") &&
     state.riskLevel === RISK_LEVEL.LOW
   ) {
     addSignal(
@@ -710,6 +713,58 @@ function evaluateBrowserRisk(state, task = {}, workerResult = {}, context = {}) 
       "risk_escalation",
       { actionTypes },
       { escalation: true }
+    );
+  }
+}
+
+function collectObservedSideEffects(workerResult = {}, context = {}) {
+  return [
+    ...(Array.isArray(workerResult.sideEffects) ? workerResult.sideEffects : []),
+    ...(Array.isArray(workerResult.side_effects) ? workerResult.side_effects : []),
+    ...(Array.isArray(workerResult.evidence?.sideEffects) ? workerResult.evidence.sideEffects : []),
+    ...(Array.isArray(workerResult.evidence?.side_effects) ? workerResult.evidence.side_effects : []),
+    ...(Array.isArray(workerResult.context?.sideEffects) ? workerResult.context.sideEffects : []),
+    ...(Array.isArray(workerResult.context?.side_effects) ? workerResult.context.side_effects : []),
+    ...(Array.isArray(context.sideEffects) ? context.sideEffects : []),
+    ...(Array.isArray(context.side_effects) ? context.side_effects : []),
+    ...(Array.isArray(workerResult.context?.fileChanges) ? workerResult.context.fileChanges : []),
+    ...(Array.isArray(workerResult.context?.file_changes) ? workerResult.context.file_changes : []),
+    ...(Array.isArray(context.fileChanges) ? context.fileChanges : []),
+    ...(Array.isArray(context.file_changes) ? context.file_changes : [])
+  ].filter((item) => item && typeof item === "object");
+}
+
+function booleanFlag(value) {
+  if (typeof value === "boolean") return value;
+  return /^(1|true|yes)$/i.test(String(value || ""));
+}
+
+function evaluateObservedSideEffectRisk(state, task = {}, workerResult = {}, context = {}) {
+  for (const item of collectObservedSideEffects(workerResult, context)) {
+    const type = String(item.type || item.kind || item.action || "").toLowerCase();
+    const target = collapseText(item.target || item.path || item.file || item.url || "");
+    const deleted = booleanFlag(item.deleted) || /(?:^|_)(?:delete|deleted|remove|removed|rm)(?:_|$)/i.test(type);
+    const destructive = deleted || /\b(?:delete|deleted|remove|removed|destroy|drop|truncate|overwrite)\b/i.test(type);
+    if (!destructive) continue;
+    const expected = item.expected == null ? true : booleanFlag(item.expected);
+    const unexpected = booleanFlag(item.unexpected) || expected === false;
+    const broad = booleanFlag(item.broad) || isBroadTarget(target) || isSystemPath(target);
+    const reason = deleted
+      ? "Worker reported unexpected file deletion side effect."
+      : "Worker reported unexpected destructive side effect.";
+    addSignal(
+      state,
+      RISK_LEVEL.CRITICAL,
+      reason,
+      "observed_side_effect",
+      {
+        type,
+        target,
+        expected,
+        unexpected,
+        broad
+      },
+      { blocked: unexpected || broad }
     );
   }
 }
@@ -782,7 +837,7 @@ function evaluateEscalationRisk(state, task = {}, workerResult = {}, context = {
   const model = String(context.model || workerResult.model || "").toLowerCase();
   if (
     (workerStatus === "failure" || workerStatus === "retry") &&
-    (model.includes(":free") || model.startsWith("oc/") || model.startsWith("gc/"))
+    (model.includes(":free") || model.startsWith("gc/"))
   ) {
     addSignal(
       state,
@@ -819,6 +874,7 @@ function evaluateTaskRisk(task = {}, context = {}) {
   evaluateCapabilityRisk(state, task);
   evaluateShellRisk(state, task, workerResult, context);
   evaluateBrowserRisk(state, task, workerResult, context);
+  evaluateObservedSideEffectRisk(state, task, workerResult, context);
   evaluateEscalationRisk(state, task, workerResult, context);
 
   state.riskReasons = uniqueList(state.riskReasons);

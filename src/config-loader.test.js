@@ -35,10 +35,10 @@ function testUserConfigOverridesDefaults() {
       maxTasks: 2,
       dynamicFreeModels: false,
       modelPools: {
-        commander: ["cx/test-commander"],
-        strong: ["openrouter/test-strong"],
-        coding: ["cx/gpt-5.5"],
-        free: ["openrouter/test-free:free"]
+        commander: ["gpt5.5"],
+        strong: ["qwen/test-strong"],
+        coding: ["gpt5.5"],
+        free: ["qwen/test-free:free"]
       },
       promptSettings: {
         workerSystem: "Custom worker prompt"
@@ -64,8 +64,8 @@ function testUserConfigOverridesDefaults() {
   assert.equal(config.maxTasks, 2);
   assert.equal(config.dynamicFreeModels, false);
   assert.equal(config.modelPools.commander[0], "gpt5.5");
-  assert.equal(config.modelPools.strong[0], "openrouter/test-strong");
-  assert.equal(config.modelPools.free[0], "openrouter/test-free:free");
+  assert.equal(config.modelPools.strong[0], "qwen/test-strong");
+  assert.equal(config.modelPools.free[0], "qwen/test-free:free");
   assert.doesNotMatch(config.modelPools.coding.join(" "), /cx\/gpt-5\.5/);
   assert.equal(config.promptSettings.workerSystem, "Custom worker prompt");
   assert.equal(config.budget.goal.maxTokens, 1234);

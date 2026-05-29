@@ -91,7 +91,8 @@ function switchAgentRouteSection(section){
     chat:["聊天","消息流和内部过程"],
     monitor:["监控中心","观察目标、任务、风险、验证、预算、恢复和事件时间线。"],
     models:["模型管理","查看模型等级、成本状态，并调整路由配置。"],
-    providers:["供应商设置","管理供应商、API Key 和自定义模型端点。"],
+    "model-apis":["模型 API","配置官方 API、API Key 和第三方 Base URL。"],
+    providers:["模型 API","配置官方 API、API Key 和第三方 Base URL。"],
     memory:["记忆","检索和维护长期经验，帮助系统减少重复错误。"],
     logs:["执行日志","查看本地执行日志、错误和最近事件。"]
   };
@@ -130,7 +131,7 @@ document.addEventListener("click",function(e){
   if(e.target.closest("[data-close-sidebar]")){var closeSidebar=document.querySelector(".sidebar");if(closeSidebar)closeSidebar.classList.remove("open");return}
   var open=e.target.closest("[data-open-settings]");
   if(open){openSettings(open.getAttribute("data-open-settings"));return}
-  if(e.target.closest("[data-open-providers]")){switchAgentRouteSection("providers");return}
+  if(e.target.closest("[data-open-model-apis]")){switchAgentRouteSection("model-apis");return}
   if(e.target.closest("[data-close-settings]")){closeSettings();return}
   var tab=e.target.closest("[data-settings-tab]");
   if(tab){setTab(tab.getAttribute("data-settings-tab"));return}

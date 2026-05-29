@@ -4,7 +4,7 @@
 
 ## 目标运行：`/api/agent-route/ui-stream`
 
-运行目标的**唯一入口**。`POST` 一个含 `messages` 的请求体，返回 Vercel AI SDK 的 UIMessage 流。内部进入 LangGraph runner（`validate_request → prepare_run → execute_goal → complete_run`），通过流持续推送事件。
+运行目标的**唯一入口**。`POST` 一个含 `messages` 的请求体，返回 Vercel AI SDK 的 UIMessage 流。内部进入 LangGraph runner（`validate_request → initialize_runtime → plan_or_resume → begin_iteration → select_ready_task → run_ready_task → review_iteration → finalize_goal → complete_run`），通过流持续推送事件。
 
 ```bash
 curl -N -X POST http://localhost:20128/api/agent-route/ui-stream \
@@ -15,6 +15,8 @@ curl -N -X POST http://localhost:20128/api/agent-route/ui-stream \
 请求体可带的字段（节选）：`messages`、`goal_id` / `goalId`（恢复已有目标）、以及覆盖 `maxTasks`、`maxGoalIterations`、`budget`、模型池等运行配置的字段。
 
 流中常见事件类型：`start`、`strategy`、`memory`、`plan`、`graph`、`budget`、`langgraph`（节点状态）、任务级别事件、`goal_check`、`pause`（blocked / waiting_human）、`final`。
+
+内部结构化模型阶段统一使用 `/v1/chat/completions` function calling：planner、模型 worker、verifier、reviewer 和 finalizer 的响应必须调用运行时指定的唯一 function。运行时不接受文本 JSON、旧 `function_call` 或 `response_format` 回退。
 
 > 注意：若请求体里带的是 `action` 字段（见下），该端点会转交给 action 处理逻辑，而不是跑目标流。
 
@@ -36,9 +38,11 @@ curl -X POST http://localhost:20128/api/agent-route/run \
 
 `config_status` / `runtime_config` / `get_config` · `recovery_status` / `runtime_recovery_status` · `run_recovery` / `runtime_recovery` / `recover_runtime`
 
-### Provider 管理
+### 已移除的旧 Provider 管理
 
 `provider_status` / `providers` / `list_providers` · `save_provider` / `upsert_provider` · `delete_provider` / `remove_provider` · `test_provider` / `test_provider_connection` · `save_provider_node` / `upsert_provider_node` · `delete_provider_node` / `remove_provider_node`
+
+这些 action 会返回 `410 legacy_provider_removed`。请改用控制台的 **模型 API** 页面或 `/api/model-apis`。
 
 ### 目标与任务
 
@@ -110,22 +114,18 @@ agentroute://artifacts/{artifactId}
 
 **Prompts（5 个）：** `agentroute.planner`、`agentroute.worker`、`agentroute.verifier`、`agentroute.reviewer`、`agentroute.finalizer`。
 
-MCP **不**暴露 shell、browser、files、web、codex-cli 等写入型工具；危险动作仍需经过风险、预算、验证与人工确认闸门。
+MCP **不**对外暴露 shell、browser、files、web、codex-cli 等 worker 工具；危险动作仍需经过风险、预算、验证与人工确认闸门。进程内 worker MCP 会注册 `agentroute.worker.files`，仅用于 agent 运行时的本地只读文件/目录取证。
 
-## Provider / 模型 / 设置 REST 端点
+## 模型 API / 模型 / 设置 REST 端点
 
-| 端点                                                            | 方法               | 说明                         |
-| --------------------------------------------------------------- | ------------------ | ---------------------------- |
-| `/api/providers`                                                | GET / POST         | 列出 / 新增 provider 连接    |
-| `/api/providers/[id]`                                           | GET / PUT / DELETE | 单个 provider                |
-| `/api/providers/[id]/models`                                    | ——                 | provider 的模型列表          |
-| `/api/providers/[id]/test` · `/test-models`                     | ——                 | 连接 / 模型测试              |
-| `/api/providers/validate` · `/test-batch` · `/suggested-models` | ——                 | 校验、批量测试、建议模型     |
-| `/api/providers/kilo/free-models`                               | ——                 | 免费模型列表                 |
-| `/api/provider-nodes` · `/[id]` · `/validate`                   | ——                 | provider 节点管理            |
-| `/api/oauth/[provider]/[action]`                                | ——                 | provider OAuth 流程          |
-| `/api/models/alias` · `/availability` · `/disabled` · `/test`   | ——                 | 模型别名、可用性、禁用、测试 |
-| `/api/settings`                                                 | ——                 | 运行设置                     |
+| 端点                                                          | 方法       | 说明                         |
+| ------------------------------------------------------------- | ---------- | ---------------------------- |
+| `/api/model-apis`                                             | GET / POST | 列出 / 保存模型 API 设置     |
+| `/api/providers*`                                             | ——         | 已移除，返回 410             |
+| `/api/provider-nodes*`                                        | ——         | 已移除，返回 410             |
+| `/api/oauth*`                                                 | ——         | 已移除，返回 410             |
+| `/api/models/alias` · `/availability` · `/disabled` · `/test` | ——         | 模型别名、可用性、禁用、测试 |
+| `/api/settings`                                               | ——         | 运行设置                     |
 
 ## 已禁用的公开兼容入口
 

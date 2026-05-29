@@ -255,7 +255,11 @@ function safeJsonParse(text, options = {}) {
 function extractChatContent(data) {
   const message = data && data.choices && data.choices[0] && data.choices[0].message;
   if (!message) return "";
+  const toolCall = Array.isArray(message.tool_calls) ? message.tool_calls[0] : null;
+  const toolArguments =
+    toolCall && toolCall.function && typeof toolCall.function.arguments === "string" ? toolCall.function.arguments : "";
   return (
+    normalizeContent(toolArguments) ||
     normalizeContent(message.content) ||
     normalizeContent(message.reasoning_content) ||
     normalizeContent(message.reasoningContent) ||

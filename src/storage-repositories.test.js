@@ -112,7 +112,7 @@ function testAuxiliaryRepositories() {
   modelStatsRepository.recordModelCall({
     goalId: "goal-repo",
     taskId: "task-repo",
-    model: "openrouter/test-free:free",
+    model: "qwen/test-free:free",
     status: "success",
     latencyMs: 25
   });

@@ -1,7 +1,7 @@
 import { createRequire } from "module";
 
 const require = createRequire(import.meta.url);
-const providerSettings = require("../../src/core/providers");
+const modelApiSettings = require("../../src/core/model-api-settings");
 const { corsHeaders, preflightResponse } = require("../../src/security/cors");
 
 export const runtime = "nodejs";
@@ -20,7 +20,7 @@ export function errorResponse(request, err, status = 400) {
     {
       error: {
         message: err && err.message ? err.message : String(err),
-        code: err && err.code ? err.code : "provider_error",
+        code: err && err.code ? err.code : "model_api_error",
         type: "invalid_request_error"
       }
     },
@@ -36,4 +36,5 @@ export async function readJsonBody(request) {
   }
 }
 
-export { preflightResponse, providerSettings };
+export { preflightResponse };
+export const providerSettings = modelApiSettings;

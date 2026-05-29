@@ -57,7 +57,7 @@ async function runFinalSynthesis({
   emitBudget,
   persistGoalBudget,
   taskSummary,
-  callWithFallback,
+  callRoutedModel,
   startedAt,
   classifyFinalStatus,
   normalizePromptSettings
@@ -75,7 +75,7 @@ async function runFinalSynthesis({
     task: taskSummary(finalTask),
     candidates: finalModels.slice(0, 8)
   });
-  const finalAttempt = await callWithFallback({
+  const finalAttempt = await callRoutedModel({
     req,
     nextHandler,
     baseBody,
@@ -109,7 +109,7 @@ async function runFinalSynthesis({
         ...data,
         task: taskSummary(finalTask)
       }),
-    responseFormatKind: protocol.KIND.FINAL_ANSWER,
+    functionCallKind: protocol.KIND.FINAL_ANSWER,
     validateContent: (content) =>
       protocol.validationForCall(content, protocol.KIND.FINAL_ANSWER, (value) =>
         typeof value.answerMarkdown === "string" && value.answerMarkdown.trim()

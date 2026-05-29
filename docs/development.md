@@ -33,7 +33,7 @@ npm test                 # 运行 src 下全部 *.test.js
 
 ```text
 security-regression · config-loader · storage-repositories · tools-runtime
-provider-oauth-runtime · agent-evidence · agent-verification-file-intent
+agent-evidence · agent-verification-file-intent
 agent-authenticity · agent-corrective · agent-action-decision · agent-action-learning
 agent-decision-attribution · agent-recovery · agent-document-generation
 agent-route-dashboard · agent-orchestration · agent-route-task-runtime
@@ -95,7 +95,7 @@ curl -X POST http://localhost:20128/api/agent-route/run -d '{ "action": "run_rec
 
 ## 故障排查
 
-- **内部模型调用报错 "Configure AGENT_ROUTE_UPSTREAM_CHAT_URL …"**：未配置上游。设置 `AGENT_ROUTE_UPSTREAM_CHAT_URL` + `AGENT_ROUTE_UPSTREAM_API_KEY`，或在控制台添加启用的 provider 连接（见 [配置指南](configuration.md)）。
+- **内部模型调用报错 "Configure an active model API entry …"**：没有匹配的模型 API。打开 `/agent-route#model-apis`，启用对应 provider 并填写 API Key、Base URL、默认模型和模型列表。
 - **`/api/agent-route/run` 跑目标返回 410**：旧 SSE 目标流已禁用，改用 `/api/agent-route/ui-stream`（见 [API 参考](api.md)）。
 - **`/v1/*` 返回 404**：公开兼容入口被显式关闭，符合预期。
 - **跨域请求 401**：已配置本地 API key，但请求未携带或无效；带上 `Authorization: Bearer <key>`，或确认为同源请求。

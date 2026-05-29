@@ -7,7 +7,7 @@
 - `codex-cli/`: 调用本地 Codex CLI、处理临时输出文件、过滤日志、标准化执行结果。
 - `web/`: 只读公开网页搜索和 URL/API fetch，返回 URL、HTTP status、title/text 和 API evidence。
 - `shell/`: 执行命令并返回 `stdout`、`stderr`、`exitCode`、`durationMs` 等结构化结果。
-- `files/`: 文件存在性、大小、读取、写入、哈希、临时文件/目录。
+- `files/`: 文件存在性、大小、读取、目录枚举、文件发现、写入、哈希、临时文件/目录。
 - `browser/`: 浏览器会话、可选 Playwright 适配器、mock adapter、页面动作、页面快照、截图结果收集。
 
 边界：

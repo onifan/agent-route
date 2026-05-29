@@ -353,43 +353,8 @@ function isFailed(status) {
   return ["failed", "blocked", "canceled"].includes(String(status || ""));
 }
 
-function goalStatusFromTasks(goal = {}, events = []) {
-  const tasks = array(goal.tasks);
-  const orderedEvents = array(events)
-    .slice()
-    .sort((a, b) => Date.parse(b.at || 0) - Date.parse(a.at || 0));
-  const terminalEvent = orderedEvents.find((event) => {
-    const type = String(event.type || "").toLowerCase();
-    const status = String(
-      (event.data && (event.data.status || event.data.finalStatus || event.data.final_status)) || ""
-    ).toLowerCase();
-    return type === "error" || (type === "done" && status) || (type === "final" && status);
-  });
-  if (terminalEvent) {
-    const type = String(terminalEvent.type || "").toLowerCase();
-    const status = String(
-      (terminalEvent.data &&
-        (terminalEvent.data.status || terminalEvent.data.finalStatus || terminalEvent.data.final_status)) ||
-        ""
-    ).toLowerCase();
-    if (type === "error") return "failed";
-    if (["failed", "blocked", "waiting_human", "awaiting_confirmation", "completed"].includes(status)) return status;
-  }
-  const latestPause = orderedEvents.find((event) => event.type === "pause");
-  if (latestPause) return (latestPause.data && latestPause.data.status) || "paused";
-  const storedStatus = String(goal.status || "").toLowerCase();
-  if (!tasks.length) {
-    if (["failed", "blocked", "waiting_human", "awaiting_confirmation", "completed", "running"].includes(storedStatus))
-      return storedStatus;
-    return "planning";
-  }
-  if (tasks.some((task) => task.status === "running")) return "running";
-  if (tasks.some((task) => task.status === "waiting_human" || task.status === "awaiting_confirmation"))
-    return "waiting_human";
-  if (tasks.some((task) => task.status === "blocked")) return "blocked";
-  if (tasks.every((task) => isDone(task.status))) return "completed";
-  if (tasks.every((task) => isDone(task.status) || isFailed(task.status))) return "failed";
-  return "waiting";
+function storedGoalStatus(goal = {}) {
+  return String(goal.status || "").toLowerCase() || "planning";
 }
 
 function verificationHealth(tasks = []) {
@@ -511,7 +476,7 @@ function goalDashboard(goalId = "") {
     const budget = summarizeBudget(tasks, goal.budgetState);
     return {
       goalId: goal.goalId,
-      status: goalStatusFromTasks(goal, goalEvents.slice().reverse()),
+      status: storedGoalStatus(goal),
       currentPhase:
         (goal.strategyState &&
           goal.strategyState.phasePlan &&
@@ -905,7 +870,7 @@ function diagnostics(goalId = "") {
       });
     return {
       goalId: goal.goalId,
-      status: goalStatusFromTasks(goal, listEvents({ goalId: goal.goalId, limit: 100 })),
+      status: storedGoalStatus(goal),
       rootCauses: reasons,
       summary: reasons.length
         ? `Goal has ${reasons.length} observable blocker category/categories.`

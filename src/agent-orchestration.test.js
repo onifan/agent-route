@@ -17,6 +17,7 @@ const browserWorker = require("./agent/orchestrator/browser-worker");
 const dependencyEngine = require("./agent/graph");
 const initialPlanning = require("./agent/orchestrator/initial-planning");
 const finalizer = require("./agent/orchestrator/finalizer");
+const localReadWorker = require("./agent/orchestrator/local-read-worker");
 const planner = require("./agent/orchestrator/planner");
 const protocol = require("./agent/orchestrator/protocol");
 const resultNormalizer = require("./agent/orchestrator/result-normalizer");
@@ -35,6 +36,28 @@ const taskRuntime = require("./agent/tasks");
 const verificationEngine = require("./agent/verification/engine");
 const { DEFAULT_PROMPT_SETTINGS } = require("./config/prompts");
 const { DEFAULT_CONFIG, normalizePromptSettings } = require("./config/loader");
+
+function functionCompletion(kind, argumentsValue, extraMessage = {}) {
+  return {
+    choices: [
+      {
+        message: {
+          content: "",
+          ...extraMessage,
+          tool_calls: [
+            {
+              type: "function",
+              function: {
+                name: protocol.functionNameForKind(kind),
+                arguments: typeof argumentsValue === "string" ? argumentsValue : JSON.stringify(argumentsValue || {})
+              }
+            }
+          ]
+        }
+      }
+    ]
+  };
+}
 
 function reset() {
   taskRuntime.resetRuntime();
@@ -82,8 +105,8 @@ function testInternetResearchIsRoutedToAgentToolWorker() {
       modelPool: "codex-cli",
       prompt: "真实联网搜索公开项目，可以访问 https://remotive.com/api/remote-jobs?search=python%20automation"
     }),
-    true,
-    "read-only public web research should reach the web tool worker instead of model or codex-cli execution"
+    false,
+    "MCP worker dispatch must not infer the web tool from prompt text; planner normalization supplies explicit type/toolWorker"
   );
   assert.equal(
     browserWorker.shouldUseBrowserWorker({
@@ -102,6 +125,15 @@ function testInternetResearchIsRoutedToAgentToolWorker() {
     }),
     false,
     "web_read tasks belong to the web tool, not the browser automation worker"
+  );
+  assert.equal(
+    browserWorker.shouldUseBrowserWorker({
+      type: "browser",
+      toolWorker: "browser",
+      input: "data:text/html;charset=utf-8,%3Chtml%3E%3Cbody%3Eok%3C%2Fbody%3E%3C%2Fhtml%3E"
+    }),
+    true,
+    "explicit browser tasks still route to the browser MCP worker"
   );
   const normalizedPlan = planner.normalizePlan(
     {
@@ -183,9 +215,10 @@ function testInternetResearchIsRoutedToAgentToolWorker() {
     ],
     null
   );
-  assert.equal(localFileRead.tasks[0].type, "local_execution");
-  assert.equal(localFileRead.tasks[0].modelPool, "codex-cli");
-  assert.notEqual(localFileRead.tasks[0].toolWorker, "web");
+  assert.equal(localFileRead.tasks[0].type, "local_read");
+  assert.equal(localFileRead.tasks[0].modelPool, "free");
+  assert.equal(localFileRead.tasks[0].toolWorker, "files");
+  assert.equal(localReadWorker.shouldUseLocalReadWorker(localFileRead.tasks[0]), true);
   assert.equal(
     webToolWorker.searchQuery(
       {
@@ -316,6 +349,42 @@ function testWebToolWorkerUsesQuotedPromptQueriesWhenInputMissing() {
   assert.ok(queries.every((query) => !/candidate public search queries|return URL/i.test(query)));
 }
 
+function testWebToolWorkerIgnoresStructuredQueryLabels() {
+  const queries = webToolWorker.searchQueries(
+    {
+      id: "discover-sources",
+      title: "Discover public sources",
+      type: "web_search",
+      input:
+        "Queries:\nJapan yen JGB risk May 2026 Reuters BOJ Fed Treasury yields\nBank of Japan bond market volatility May 2026"
+    },
+    []
+  );
+  assert.deepEqual(queries.slice(0, 2), [
+    "Japan yen JGB risk May 2026 Reuters BOJ Fed Treasury yields",
+    "Bank of Japan bond market volatility May 2026"
+  ]);
+  assert.ok(!queries.includes("Queries"));
+}
+
+function testMetaVerificationTaskDoesNotInferWebWorkerFromGoalMessages() {
+  assert.equal(
+    webToolWorker.shouldUseWebToolWorker(
+      {
+        id: "reconcile-evidence",
+        title: "Reconcile evidence",
+        type: "verification",
+        modelPool: "free",
+        toolWorker: "none",
+        input: "Use verified upstream evidence to decide whether an incomplete source path is superseded.",
+        prompt: "Do not fetch new web data. Return an auditable conclusion."
+      },
+      [{ role: "user", content: "查询最新公开市场数据并写报告。" }]
+    ),
+    false
+  );
+}
+
 function testReadOnlyNewsMetadataDoesNotForceCodexCli() {
   const normalizedPlan = planner.normalizePlan(
     {
@@ -423,8 +492,8 @@ async function testWebEvidenceReviewAndFinalStayOnCommanderModels() {
     modelPools: {
       ...DEFAULT_CONFIG.modelPools,
       commander: commanderRoute.models,
-      strong: ["openrouter/deepseek/deepseek-r1-0528"],
-      free: ["gc/gemini-3-flash-preview", "openrouter/z-ai/glm-4.5-air:free"]
+      strong: ["deepseek/deepseek-v4-pro"],
+      free: ["gc/gemini-3-flash-preview", "glm/glm-4.5:free"]
     }
   };
   const workerResults = [
@@ -444,24 +513,18 @@ async function testWebEvidenceReviewAndFinalStayOnCommanderModels() {
     const body = await request.json();
     bodies.push(body);
     return new Response(
-      JSON.stringify({
-        choices: [
-          {
-            message: {
-              content: JSON.stringify({
-                kind: "final_answer",
-                schemaVersion: 1,
-                status: "completed",
-                answerMarkdown: "final answer",
-                artifacts: [],
-                evidenceSummary: ["verified web evidence"],
-                uncertainties: [],
-                nextSteps: []
-              })
-            }
-          }
-        ]
-      }),
+      JSON.stringify(
+        functionCompletion(protocol.KIND.FINAL_ANSWER, {
+          kind: "final_answer",
+          schemaVersion: 1,
+          status: "completed",
+          answerMarkdown: "final answer",
+          artifacts: [],
+          evidenceSummary: ["verified web evidence"],
+          uncertainties: [],
+          nextSteps: []
+        })
+      ),
       {
         status: 200,
         headers: { "Content-Type": "application/json" }
@@ -489,7 +552,7 @@ async function testWebEvidenceReviewAndFinalStayOnCommanderModels() {
     emitBudget: () => {},
     persistGoalBudget: () => {},
     taskSummary: (task) => task,
-    callWithFallback: orchestratorRuntime.callWithFallback,
+    callRoutedModel: orchestratorRuntime.callRoutedModel,
     startedAt: Date.now(),
     normalizePromptSettings: (value) => value || DEFAULT_PROMPT_SETTINGS
   });
@@ -514,8 +577,8 @@ async function testWebEvidenceProgressReviewStaysOnCommanderModels() {
     modelPools: {
       ...DEFAULT_CONFIG.modelPools,
       commander: commanderRoute.models,
-      strong: ["openrouter/deepseek/deepseek-r1-0528"],
-      free: ["gc/gemini-3-flash-preview", "openrouter/z-ai/glm-4.5-air:free"]
+      strong: ["deepseek/deepseek-v4-pro"],
+      free: ["gc/gemini-3-flash-preview", "glm/glm-4.5:free"]
     }
   };
   const allTasks = [{ id: "evidence", title: "公开证据", type: "web_search", status: "completed" }];
@@ -526,7 +589,7 @@ async function testWebEvidenceProgressReviewStaysOnCommanderModels() {
   await reviewRunner.runReviewIteration({
     req: new Request("http://localhost/api/v1/chat/completions", { method: "POST" }),
     nextHandler: async () => {
-      throw new Error("test callWithFallback should intercept model calls");
+      throw new Error("test callRoutedModel should intercept model calls");
     },
     baseBody: { max_tokens: 256, temperature: 0.2 },
     messages: [{ role: "user", content: "基于公开证据判断是否完成。" }],
@@ -548,7 +611,7 @@ async function testWebEvidenceProgressReviewStaysOnCommanderModels() {
     emitStrategy: () => {},
     persistGoalBudget: () => {},
     taskSummary: (task) => task,
-    callWithFallback: async ({ models }) => {
+    callRoutedModel: async ({ models }) => {
       modelLists.push(models);
       return {
         ok: true,
@@ -591,7 +654,7 @@ async function testFailedReviewStopsWithoutStrategyLoop() {
   const result = await reviewRunner.runReviewIteration({
     req: new Request("http://localhost/api/v1/chat/completions", { method: "POST" }),
     nextHandler: async () => {
-      throw new Error("test callWithFallback should intercept model calls");
+      throw new Error("test callRoutedModel should intercept model calls");
     },
     baseBody: { max_tokens: 256, temperature: 0.2 },
     messages: [{ role: "user", content: "review failed path" }],
@@ -613,7 +676,7 @@ async function testFailedReviewStopsWithoutStrategyLoop() {
     emitStrategy: (event, data) => strategyEvents.push({ event, data }),
     persistGoalBudget: () => {},
     taskSummary: (task) => task,
-    callWithFallback: async () => ({
+    callRoutedModel: async () => ({
       ok: false,
       model: "gpt5.5",
       error: "timeout",
@@ -1021,7 +1084,7 @@ async function testPlanningFailureDoesNotEmitSuccessfulFinal() {
     messages: [{ role: "user", content: "只读分析 worker 调用链路" }],
     config: { ...DEFAULT_CONFIG, modelMaxAttempts: 1 },
     defaultConfig: DEFAULT_CONFIG,
-    commanderRoute: { selected: "openrouter/test", models: ["openrouter/test"] },
+    commanderRoute: { selected: "qwen/test", models: ["qwen/test"] },
     goalId,
     plannerMemory: "",
     goalStrategy: null,
@@ -1032,9 +1095,9 @@ async function testPlanningFailureDoesNotEmitSuccessfulFinal() {
     appendTasks: () => [],
     taskSummary: (task) => task,
     startedAt: Date.now(),
-    callWithFallback: async () => ({
+    callRoutedModel: async () => ({
       ok: false,
-      model: "openrouter/test",
+      model: "qwen/test",
       error: "upstream credits exhausted",
       elapsedMs: 10
     }),
@@ -1076,7 +1139,7 @@ async function testInvalidWebPlanFailsWithoutRulePlanner() {
     ],
     config: { ...DEFAULT_CONFIG, modelMaxAttempts: 1 },
     defaultConfig: DEFAULT_CONFIG,
-    commanderRoute: { selected: "openrouter/test", models: ["openrouter/test"] },
+    commanderRoute: { selected: "qwen/test", models: ["qwen/test"] },
     goalId,
     plannerMemory: "",
     goalStrategy: null,
@@ -1087,9 +1150,9 @@ async function testInvalidWebPlanFailsWithoutRulePlanner() {
     appendTasks: (tasks) => tasks,
     taskSummary: (task) => task,
     startedAt: Date.now(),
-    callWithFallback: async () => ({
+    callRoutedModel: async () => ({
       ok: true,
-      model: "openrouter/test",
+      model: "qwen/test",
       content: "not json",
       elapsedMs: 10
     }),
@@ -1111,7 +1174,7 @@ async function testInvalidWebPlanFailsWithoutRulePlanner() {
 async function testProviderCreditLimitRetriesWithLowerMaxTokens() {
   const trace = [];
   const requestBodies = [];
-  const result = await orchestratorRuntime.callWithFallback({
+  const result = await orchestratorRuntime.callRoutedModel({
     req: new Request("http://localhost/api/v1/chat/completions", {
       method: "POST",
       headers: { "Content-Type": "application/json" }
@@ -1156,7 +1219,7 @@ async function testProviderCreditLimitRetriesWithLowerMaxTokens() {
       );
     },
     baseBody: { max_tokens: 1600, temperature: 0.2 },
-    models: ["openrouter/test-model"],
+    models: ["qwen/test-model"],
     messages: [{ role: "user", content: "Create a compact plan." }],
     config: DEFAULT_CONFIG,
     label: "plan",
@@ -1176,14 +1239,14 @@ async function testProviderCreditLimitRetriesWithLowerMaxTokens() {
 async function testModelCallProgressEventsExposeAttemptsAndFailover() {
   const events = [];
   const trace = [];
-  const result = await orchestratorRuntime.callWithFallback({
+  const result = await orchestratorRuntime.callRoutedModel({
     req: new Request("http://localhost/api/v1/chat/completions", {
       method: "POST",
       headers: { "Content-Type": "application/json" }
     }),
     nextHandler: async (request) => {
       const body = await request.json();
-      if (body.model === "openrouter/first-model") {
+      if (body.model === "qwen/first-model") {
         return new Response(JSON.stringify({ error: { message: "first model failed" } }), {
           status: 500,
           headers: { "Content-Type": "application/json" }
@@ -1195,7 +1258,7 @@ async function testModelCallProgressEventsExposeAttemptsAndFailover() {
       });
     },
     baseBody: { max_tokens: 256, temperature: 0.2 },
-    models: ["openrouter/first-model", "openrouter/second-model"],
+    models: ["qwen/first-model", "qwen/second-model"],
     messages: [{ role: "user", content: "Return a short answer." }],
     config: { ...DEFAULT_CONFIG, modelMaxAttempts: 1 },
     label: "plan",
@@ -1209,17 +1272,17 @@ async function testModelCallProgressEventsExposeAttemptsAndFailover() {
     events.map((item) => item.event),
     ["model_attempt", "model_failure", "model_failover", "model_attempt", "model_success"]
   );
-  assert.equal(events[0].data.model, "openrouter/first-model");
-  assert.equal(events[2].data.fromModel, "openrouter/first-model");
-  assert.equal(events[2].data.toModel, "openrouter/second-model");
-  assert.equal(events[4].data.model, "openrouter/second-model");
+  assert.equal(events[0].data.model, "qwen/first-model");
+  assert.equal(events[2].data.fromModel, "qwen/first-model");
+  assert.equal(events[2].data.toModel, "qwen/second-model");
+  assert.equal(events[4].data.model, "qwen/second-model");
 }
 
 async function testModelCallDoesNotRetryConnectionFailure() {
   const events = [];
   const trace = [];
   let calls = 0;
-  const result = await orchestratorRuntime.callWithFallback({
+  const result = await orchestratorRuntime.callRoutedModel({
     req: new Request("http://localhost/api/v1/chat/completions", {
       method: "POST",
       headers: { "Content-Type": "application/json" }
@@ -1261,17 +1324,29 @@ async function testModelCallDoesNotRetryInvalidStructuredOutput() {
   const events = [];
   const trace = [];
   let calls = 0;
-  const result = await orchestratorRuntime.callWithFallback({
+  const result = await orchestratorRuntime.callRoutedModel({
     req: new Request("http://localhost/api/v1/chat/completions", {
       method: "POST",
       headers: { "Content-Type": "application/json" }
     }),
     nextHandler: async () => {
       calls += 1;
-      return new Response(JSON.stringify({ choices: [{ message: { content: "not json" } }] }), {
-        status: 200,
-        headers: { "Content-Type": "application/json" }
-      });
+      return new Response(
+        JSON.stringify({
+          choices: [
+            {
+              message: {
+                content: JSON.stringify({
+                  kind: "plan",
+                  schemaVersion: 1,
+                  tasks: [{ id: "text-plan", title: "Old text path", type: "analysis" }]
+                })
+              }
+            }
+          ]
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } }
+      );
     },
     baseBody: { max_tokens: 256, temperature: 0.2 },
     models: ["GPT-5.5"],
@@ -1280,6 +1355,7 @@ async function testModelCallDoesNotRetryInvalidStructuredOutput() {
     label: "plan",
     trace,
     endpointMode: "chat",
+    functionCallKind: protocol.KIND.PLAN,
     validateContent: (content) => {
       const parsed = planner.parsePlannerContent(content);
       return parsed ? { ok: true } : { ok: false, error: "Planner response did not contain a valid plan schema." };
@@ -1294,7 +1370,7 @@ async function testModelCallDoesNotRetryInvalidStructuredOutput() {
     ["model_attempt", "model_failure"]
   );
   assert.equal(events[1].data.model, "GPT-5.5");
-  assert.match(result.error, /valid plan schema/);
+  assert.match(result.error, /must call agent_route_plan exactly once/);
   assert.equal(
     trace.some((item) => item.retry),
     false
@@ -1314,7 +1390,7 @@ async function testStructuredOutputErrorExplainsMultipleJsonDocuments() {
     schemaVersion: 1,
     tasks: [{ id: "second", title: "Second", type: "analysis", modelPool: "free", successCriteria: ["second"] }]
   };
-  const result = await orchestratorRuntime.callWithFallback({
+  const result = await orchestratorRuntime.callRoutedModel({
     req: new Request("http://localhost/api/v1/chat/completions", {
       method: "POST",
       headers: { "Content-Type": "application/json" }
@@ -1324,19 +1400,19 @@ async function testStructuredOutputErrorExplainsMultipleJsonDocuments() {
       const body = await request.json();
       requestBodies.push(body);
       const content = `${JSON.stringify(first)}${JSON.stringify(second)}`;
-      return new Response(JSON.stringify({ choices: [{ message: { content } }] }), {
+      return new Response(JSON.stringify(functionCompletion(protocol.KIND.PLAN, content)), {
         status: 200,
         headers: { "Content-Type": "application/json" }
       });
     },
-    baseBody: { max_tokens: 512, temperature: 0.2 },
+    baseBody: { max_tokens: 512, temperature: 0.2, response_format: { type: "json_object" } },
     models: ["GPT-5.5"],
     messages: [{ role: "user", content: "Return one AgentRoute plan object." }],
     config: { ...DEFAULT_CONFIG, modelMaxAttempts: 2 },
     label: "plan",
     trace: [],
     endpointMode: "chat",
-    responseFormatKind: protocol.KIND.PLAN,
+    functionCallKind: protocol.KIND.PLAN,
     validateContent: (content) => {
       const parsed = planner.parsePlannerContent(content);
       return parsed
@@ -1352,10 +1428,13 @@ async function testStructuredOutputErrorExplainsMultipleJsonDocuments() {
   assert.equal(result.ok, false);
   assert.equal(calls, 1);
   assert.equal(requestBodies.length, 1);
-  assert.equal(requestBodies[0].response_format.type, "json_schema");
-  assert.equal(requestBodies[0].response_format.json_schema.name, "agent_route_plan");
-  assert.equal(requestBodies[0].response_format.json_schema.strict, true);
-  assert.equal(requestBodies[0].response_format.json_schema.schema.properties.kind.enum[0], "plan");
+  assert.equal(requestBodies[0].response_format, undefined);
+  assert.equal(requestBodies[0].tools[0].type, "function");
+  assert.equal(requestBodies[0].tools[0].function.name, "agent_route_plan");
+  assert.equal(requestBodies[0].tools[0].function.strict, true);
+  assert.equal(requestBodies[0].tools[0].function.parameters.properties.kind.enum[0], "plan");
+  assert.equal(requestBodies[0].tool_choice.function.name, "agent_route_plan");
+  assert.equal(requestBodies[0].parallel_tool_calls, false);
   assert.match(result.error, /multiple_different_json_documents/);
   assert.match(result.error, /topLevelJsonDocuments=2/);
 }
@@ -1470,14 +1549,14 @@ async function testToolWorkerRetriesTransientFailuresOnly() {
 
 async function testModelCallProgressEventsExposeTimeout() {
   const events = [];
-  const result = await orchestratorRuntime.callWithFallback({
+  const result = await orchestratorRuntime.callRoutedModel({
     req: new Request("http://localhost/api/v1/chat/completions", {
       method: "POST",
       headers: { "Content-Type": "application/json" }
     }),
     nextHandler: async () => new Promise(() => {}),
     baseBody: { max_tokens: 256, temperature: 0.2 },
-    models: ["openrouter/slow-model"],
+    models: ["qwen/slow-model"],
     messages: [{ role: "user", content: "Return a short answer." }],
     config: DEFAULT_CONFIG,
     label: "plan",
@@ -1488,8 +1567,8 @@ async function testModelCallProgressEventsExposeTimeout() {
   });
 
   assert.equal(result.ok, false);
-  assert.equal(result.model, "openrouter/slow-model");
-  assert.ok(events.some((item) => item.event === "model_timeout" && item.data.model === "openrouter/slow-model"));
+  assert.equal(result.model, "qwen/slow-model");
+  assert.ok(events.some((item) => item.event === "model_timeout" && item.data.model === "qwen/slow-model"));
 }
 
 function testAnalysisWorkerReceivesUpstreamEvidence() {
@@ -1527,7 +1606,7 @@ function testAnalysisWorkerReceivesUpstreamEvidence() {
 }
 
 function testCommanderPromptsSeparatePlanningFromExecution() {
-  assert.equal(DEFAULT_PROMPT_SETTINGS.version, 9);
+  assert.equal(DEFAULT_PROMPT_SETTINGS.version, 10);
   assert.match(DEFAULT_PROMPT_SETTINGS.commanderSystem, /\[角色\]/);
   assert.match(DEFAULT_PROMPT_SETTINGS.commanderSystem, /\[任务\]/);
   assert.match(DEFAULT_PROMPT_SETTINGS.commanderSystem, /\[约束\]/);
@@ -1538,13 +1617,13 @@ function testCommanderPromptsSeparatePlanningFromExecution() {
   assert.match(DEFAULT_PROMPT_SETTINGS.plannerInstructions, /Structured Output Schema v1/);
   assert.match(DEFAULT_PROMPT_SETTINGS.plannerInstructions, /kind 必须是 "plan"/);
   assert.match(DEFAULT_PROMPT_SETTINGS.plannerInstructions, /\[Few-shot\]/);
-  assert.match(DEFAULT_PROMPT_SETTINGS.plannerInstructions, /不得重复输出/);
-  assert.match(DEFAULT_PROMPT_SETTINGS.plannerInstructions, /不得使用 Markdown/);
+  assert.match(DEFAULT_PROMPT_SETTINGS.plannerInstructions, /function calling/);
+  assert.match(DEFAULT_PROMPT_SETTINGS.plannerInstructions, /不得在 assistant content 中返回 JSON/);
   assert.match(DEFAULT_PROMPT_SETTINGS.plannerInstructions, /标准英文\/代码\/缩写/);
   assert.match(DEFAULT_PROMPT_SETTINGS.plannerInstructions, /不要默认把某个来源名/);
   assert.match(DEFAULT_PROMPT_SETTINGS.reviewSystem, /失败来源诊断/);
   assert.match(DEFAULT_PROMPT_SETTINGS.reviewSystem, /kind 必须是 "goal_review"/);
-  assert.match(DEFAULT_PROMPT_SETTINGS.reviewSystem, /不要使用 Markdown/);
+  assert.match(DEFAULT_PROMPT_SETTINGS.reviewSystem, /function calling/);
   assert.match(DEFAULT_PROMPT_SETTINGS.reviewSystem, /标准英文\/代码\/缩写/);
   assert.match(DEFAULT_PROMPT_SETTINGS.reviewSystem, /避免默认把来源名/);
   assert.match(DEFAULT_PROMPT_SETTINGS.reviewSystem, /已验证证据覆盖/);
@@ -1574,8 +1653,8 @@ function testCommanderPromptsSeparatePlanningFromExecution() {
   );
   const promptText = planMessages.map((message) => message.content).join("\n");
   assert.match(promptText, /planner 输出描述的是待执行任务，不是已完成动作/);
-  assert.match(promptText, /只返回一个 JSON 对象/);
-  assert.match(promptText, /不得输出 Markdown、代码围栏、解释文字、多个 JSON/);
+  assert.match(promptText, /必须调用指定 function "agent_route_plan" 恰好一次/);
+  assert.match(promptText, /结构化结果只允许出现在 function arguments 中/);
   assert.match(promptText, /toolWorker 为 web/);
   assert.match(promptText, /modelPool 为 free/);
   assert.match(promptText, /URL\/status\/title\/text\/API evidence/);
@@ -1584,12 +1663,12 @@ function testCommanderPromptsSeparatePlanningFromExecution() {
   assert.match(promptText, /不要默认把某个来源名/);
   assert.match(promptText, /不同事实\/数据点拆成不同 web task/);
   assert.match(promptText, /不要为“最终报告、最终答案、总结汇总”单独创建普通 worker/);
-  assert.match(promptText, /Schema: \{"kind":"plan","schemaVersion":1/);
+  assert.match(promptText, /Function arguments Schema: \{"kind":"plan","schemaVersion":1/);
   assert.match(promptText, /\[结构化指令\]/);
   assert.match(promptText, /\[内部逐步推理\]/);
   assert.match(promptText, /\[Few-shot 示例\]/);
   assert.match(promptText, /示例 1 输入/);
-  assert.match(promptText, /示例 2 输出/);
+  assert.match(promptText, /示例 2 function arguments/);
   assert.match(promptText, /不要输出完整 chain-of-thought\/思维链/);
   assert.ok(promptText.length < 14000, "planner prompt must stay bounded while carrying protocol examples");
 
@@ -1605,9 +1684,9 @@ function testCommanderPromptsSeparatePlanningFromExecution() {
   );
   const reviewPromptText = reviewMessages.map((message) => message.content).join("\n");
   assert.match(reviewPromptText, /不要为了写最终报告/);
-  assert.match(reviewPromptText, /Schema: \{"kind":"goal_review","schemaVersion":1/);
+  assert.match(reviewPromptText, /Function arguments Schema: \{"kind":"goal_review","schemaVersion":1/);
   assert.match(reviewPromptText, /\[Few-shot 示例\]/);
-  assert.match(reviewPromptText, /不要使用 Markdown/);
+  assert.match(reviewPromptText, /function arguments/);
   assert.match(reviewPromptText, /next_tasks 最多 3 个/);
 
   const workerPromptText = workerRunner
@@ -1626,7 +1705,7 @@ function testCommanderPromptsSeparatePlanningFromExecution() {
     )
     .map((message) => message.content)
     .join("\n");
-  assert.match(workerPromptText, /Schema: \{"kind":"worker_result","schemaVersion":1/);
+  assert.match(workerPromptText, /Function arguments Schema: \{"kind":"worker_result","schemaVersion":1/);
   assert.match(workerPromptText, /\[Few-shot 示例\]/);
 
   const verifierPromptText = workerRunner
@@ -1644,8 +1723,10 @@ function testCommanderPromptsSeparatePlanningFromExecution() {
     )
     .map((message) => message.content)
     .join("\n");
-  assert.match(verifierPromptText, /Schema: \{"kind":"verification_result","schemaVersion":1/);
+  assert.match(verifierPromptText, /Function arguments Schema: \{"kind":"verification_result","schemaVersion":1/);
   assert.match(verifierPromptText, /\[Few-shot 示例\]/);
+  assert.match(verifierPromptText, /可恢复取证缺口/);
+  assert.match(verifierPromptText, /不要使用 blocked/);
 
   const finalPromptText = finalizer
     .makeFinalMessages(
@@ -1659,7 +1740,7 @@ function testCommanderPromptsSeparatePlanningFromExecution() {
     )
     .map((message) => message.content)
     .join("\n");
-  assert.match(finalPromptText, /Schema: \{"kind":"final_answer","schemaVersion":1/);
+  assert.match(finalPromptText, /Function arguments Schema: \{"kind":"final_answer","schemaVersion":1/);
   assert.match(finalPromptText, /\[Few-shot 示例\]/);
 
   assert.doesNotMatch(
@@ -2147,7 +2228,8 @@ function testBrowserAutomationKeywordDoesNotForceLocalExecution() {
       type: "local_execution",
       prompt: "打开 data:text/html;charset=utf-8,%3Chtml%3E%3Cbody%3Eok%3C%2Fbody%3E%3C%2Fhtml%3E 页面并读取正文。"
     }),
-    true
+    false,
+    "MCP worker dispatch must not infer browser automation from prompt text without explicit type/toolWorker"
   );
   assert.equal(
     browserWorker.shouldUseBrowserWorker({
@@ -2190,6 +2272,19 @@ function testBaselineBrowserPlanUsesLowRiskBrowserTask() {
   assert.equal(execute.type, "browser");
   assert.equal(execute.modelPool, "codex-cli");
   assert.equal(execute.riskLevel, "low");
+}
+
+function testBaselineLocalReadPlanUsesFilesWorker() {
+  const plan = planner.baselinePlan([
+    {
+      role: "user",
+      content: `只读读取本机项目 ${testRoot}，总结结构，不要修改文件。`
+    }
+  ]);
+  const localRead = plan.tasks.find((task) => task.id === "local-file-evidence");
+  assert.equal(localRead.type, "local_read");
+  assert.equal(localRead.toolWorker, "files");
+  assert.equal(localRead.modelPool, "free");
 }
 
 function testDanglingDependenciesArePrunedAfterConstraints() {
@@ -3066,8 +3161,10 @@ function testDistinctMultiQueryWebSearchRequiresEveryClause() {
     { phase: "after_worker", maxAttempts: 2 }
   );
 
-  assert.equal(verification.verificationStatus, verificationEngine.VERIFICATION_STATUS.UNVERIFIED);
+  assert.equal(verification.verificationStatus, verificationEngine.VERIFICATION_STATUS.PARTIALLY_VERIFIED);
+  assert.equal(verification.suggestedNextState, verificationEngine.SUGGESTED_NEXT_STATE.RETRYING);
   assert.ok(verification.detectedIssues.some((issue) => /gamma delta changelog|no readable/i.test(issue.issue)));
+  assert.ok(verification.missingEvidence.some((item) => /gamma delta changelog/i.test(item.description)));
 }
 
 function testReadOnlyWebReadRejectsGenericErrorShell() {
@@ -3124,7 +3221,7 @@ function testReadOnlyWebReadRejectsGenericErrorShell() {
   assert.ok(verification.detectedIssues.some((issue) => /error|failure|something went wrong/i.test(issue.issue)));
 }
 
-function testMultiQueryWebSearchVerificationRejectsUnrelatedClauseEvidence() {
+function testMultiQueryWebSearchVerificationMarksOnlyMissingClauseAsEvidenceGap() {
   const verification = verificationEngine.verifyTaskResult(
     {
       id: "multi-query-search",
@@ -3172,8 +3269,10 @@ function testMultiQueryWebSearchVerificationRejectsUnrelatedClauseEvidence() {
     { phase: "after_worker", maxAttempts: 2 }
   );
 
-  assert.equal(verification.verificationStatus, verificationEngine.VERIFICATION_STATUS.UNVERIFIED);
+  assert.equal(verification.verificationStatus, verificationEngine.VERIFICATION_STATUS.PARTIALLY_VERIFIED);
+  assert.equal(verification.suggestedNextState, verificationEngine.SUGGESTED_NEXT_STATE.RETRYING);
   assert.ok(verification.detectedIssues.some((issue) => /gamma delta changelog|unrelated to query/i.test(issue.issue)));
+  assert.ok(verification.missingEvidence.some((item) => /gamma delta changelog/i.test(item.description)));
 }
 
 function testReadOnlyWebSearchVerificationMatchesMixedCjkNumericEvidence() {
@@ -3264,6 +3363,53 @@ async function testDeepSeekReasoningContentIsParsedAsModelContent() {
   assert.match(parsed.content, /"tasks"/);
 }
 
+async function testFunctionCallingArgumentsAreParsedAsModelContent() {
+  const response = new Response(
+    JSON.stringify({
+      choices: [
+        {
+          message: {
+            content: "",
+            tool_calls: [
+              {
+                type: "function",
+                function: {
+                  name: "agent_route_plan",
+                  arguments: '{"kind":"plan","schemaVersion":1,"tasks":[]}'
+                }
+              }
+            ]
+          }
+        }
+      ]
+    }),
+    { status: 200, headers: { "Content-Type": "application/json" } }
+  );
+  const parsed = await contentUtils.parseModelResponse(response);
+  assert.match(parsed.content, /"kind":"plan"/);
+}
+
+async function testLegacyFunctionCallIsNotParsedAsModelContent() {
+  const response = new Response(
+    JSON.stringify({
+      choices: [
+        {
+          message: {
+            content: "",
+            function_call: {
+              name: "agent_route_plan",
+              arguments: '{"kind":"plan","schemaVersion":1,"tasks":[]}'
+            }
+          }
+        }
+      ]
+    }),
+    { status: 200, headers: { "Content-Type": "application/json" } }
+  );
+  const parsed = await contentUtils.parseModelResponse(response);
+  assert.equal(parsed.content, "");
+}
+
 function testModelSummaryWithoutEvidenceStaysUnverified() {
   const workerResult = resultNormalizer.makeWorkerRuntimeResult(
     {
@@ -3317,7 +3463,7 @@ function testArrayEvidenceIsTreatedAsModelClaims() {
   assert.equal(verification.verificationStatus, verificationEngine.VERIFICATION_STATUS.UNVERIFIED);
 }
 
-function testSemanticOnlyEvidenceIsTreatedAsModelClaim() {
+function testSemanticOnlyEvidenceIsAcceptedForSemanticAnalysis() {
   const workerResult = resultNormalizer.makeWorkerRuntimeResult(
     {
       ok: true,
@@ -3339,14 +3485,54 @@ function testSemanticOnlyEvidenceIsTreatedAsModelClaim() {
     },
     { id: "semantic-only", type: "analysis", modelPool: "free" }
   );
-  assert.equal(workerResult.evidence.provided, false);
+  assert.equal(workerResult.evidence.provided, true);
   const verification = verificationEngine.verifyTaskResult(
     { id: "semantic-only", type: "analysis", title: "生成摘要", successCriteria: ["覆盖目标驱动和风险控制"] },
     workerResult,
     { phase: "after_worker", maxAttempts: 2 }
   );
-  assert.equal(verification.verificationStatus, verificationEngine.VERIFICATION_STATUS.UNVERIFIED);
-  assert.notEqual(verification.suggestedNextState, verificationEngine.SUGGESTED_NEXT_STATE.COMPLETED);
+  assert.notEqual(verification.verificationStatus, verificationEngine.VERIFICATION_STATUS.UNVERIFIED);
+  assert.equal(verification.suggestedNextState, verificationEngine.SUGGESTED_NEXT_STATE.COMPLETED);
+}
+
+function testVerificationPolicyThresholdsAreRuntimeConfigurable() {
+  const workerResult = {
+    status: "success",
+    output:
+      "This proposal includes an API integration matrix, browser automation checks, milestones for discovery, integration, verification, and rollout, plus requirement confirmations and acceptance checks for the implementation team.",
+    evidence: {
+      summary: "Covers proposal.",
+      semantic: {
+        outputSummary: "Covers proposal.",
+        addressesCriteria: true,
+        criteriaCoverage: 0.65,
+        qualityScore: 0.65
+      }
+    }
+  };
+  const task = {
+    id: "policy-semantic",
+    type: "proposal",
+    title: "Draft proposal",
+    modelPool: "strong",
+    successCriteria: ["stakeholder review ready"],
+    attempts: 1,
+    maxAttempts: 1
+  };
+  const defaultVerification = verificationEngine.verifyTaskResult(task, workerResult, {
+    phase: "after_worker"
+  });
+  assert.notEqual(defaultVerification.verificationStatus, verificationEngine.VERIFICATION_STATUS.VERIFIED);
+
+  const tunedVerification = verificationEngine.verifyTaskResult(task, workerResult, {
+    phase: "after_worker",
+    verificationPolicy: {
+      confidence: { verified: 0.7, partialSemantic: 0.2 },
+      semantic: { minCriteriaCoverage: 0.6, minQualityScore: 0.6 }
+    }
+  });
+  assert.equal(tunedVerification.verificationStatus, verificationEngine.VERIFICATION_STATUS.VERIFIED);
+  assert.equal(tunedVerification.suggestedNextState, verificationEngine.SUGGESTED_NEXT_STATE.COMPLETED);
 }
 
 function testVerifierModelIsSkippedForPlanningMetaTasks() {
@@ -3364,13 +3550,55 @@ function testVerifierModelIsSkippedForPlanningMetaTasks() {
   );
 }
 
-function testPartialFinalWithFailedEvidenceDoesNotMarkGoalCompleted() {
+function testVerifierModelEvidenceGapsDoNotHardBlockAutonomousRecovery() {
+  const baseVerification = {
+    verificationStatus: verificationEngine.VERIFICATION_STATUS.PARTIALLY_VERIFIED,
+    confidence: 0.62,
+    reasons: ["Web search captured successful readable result-page evidence."],
+    detectedIssues: [],
+    suggestedNextState: verificationEngine.SUGGESTED_NEXT_STATE.RETRYING,
+    retryable: true
+  };
+  const modelReview = {
+    verificationStatus: verificationEngine.VERIFICATION_STATUS.UNVERIFIED,
+    confidence: 0.97,
+    reasons: ["Fetched pages are readable but irrelevant to the requested recent events."],
+    detectedIssues: [
+      { issue: "returned_sources_are_general_or_irrelevant_not_recent_events", severity: "high", retryable: true },
+      {
+        issue: "strategy_constraint_violated_by_repeating_failed_broad_web_search_path_without_changed_condition",
+        severity: "high",
+        retryable: false
+      }
+    ],
+    reasonCode: "semantic_mismatch_irrelevant_sources",
+    missingEvidence: ["3-5 relevant recent event URLs", "publication dates and quotable excerpts"],
+    rejectedEvidence: ["general country overview page"],
+    suggestedNextState: verificationEngine.SUGGESTED_NEXT_STATE.BLOCKED,
+    retryable: false
+  };
+
+  const merged = verificationEngine.mergeModelVerification(baseVerification, modelReview);
+  assert.equal(merged.verificationStatus, verificationEngine.VERIFICATION_STATUS.UNVERIFIED);
+  assert.equal(merged.suggestedNextState, verificationEngine.SUGGESTED_NEXT_STATE.NEEDS_EVIDENCE);
+  assert.equal(merged.retryable, true);
+  assert.ok(merged.reasons.some((reason) => /normalized to needs_evidence/.test(reason)));
+
+  const riskBlocked = verificationEngine.mergeModelVerification(baseVerification, {
+    ...modelReview,
+    suggestedNextState: verificationEngine.SUGGESTED_NEXT_STATE.BLOCKED,
+    riskFindings: [{ riskLevel: "critical", blockedReason: "External side effect requires human approval." }]
+  });
+  assert.equal(riskBlocked.suggestedNextState, verificationEngine.SUGGESTED_NEXT_STATE.BLOCKED);
+}
+
+function testFinalStatusUsesTaskGraphInsteadOfMarkdownGapText() {
   const finalStatus = orchestratorRuntime.finalGoalStatusFromTasks("部分完成：关键数据缺失，未取得可验证来源。", [
     { id: "fx", type: "web_read", status: "completed", verificationStatus: "verified" },
     { id: "news", type: "web_search", status: "failed", verificationStatus: "unverified" }
   ]);
-  assert.equal(finalStatus.status, "blocked");
-  assert.match(finalStatus.blockedReason, /incomplete required evidence/i);
+  assert.equal(finalStatus.status, "completed");
+  assert.equal(finalStatus.blockedReason, "");
   assert.equal(
     orchestratorRuntime.finalGoalStatusFromTasks("All requested evidence was verified and the result is complete.", [
       { id: "fx", type: "web_read", status: "completed", verificationStatus: "verified" }
@@ -3430,6 +3658,31 @@ function testFinalIsBlockedUntilPlannedTasksReachTerminalState() {
     "needs_evidence tasks with remaining attempts are still actionable"
   );
   assert.equal(
+    orchestratorRuntime.finalBlockedByUnresolvedPlannedTasks([
+      {
+        id: "source-a",
+        type: "api_read",
+        toolWorker: "web",
+        status: "needs_evidence",
+        attempts: 1,
+        maxAttempts: 2,
+        result: "Readable source returned placeholders.",
+        verificationStatus: "unverified",
+        produces: ["market_evidence"]
+      },
+      {
+        id: "source-b",
+        type: "api_read",
+        toolWorker: "web",
+        status: "completed",
+        verificationStatus: "verified",
+        produces: ["market_evidence"]
+      }
+    ]).blocked,
+    false,
+    "a retryable evidence gap should not block final when the same artifact is already covered by another verified task"
+  );
+  assert.equal(
     orchestratorRuntime.finalGoalStatusFromTasks("部分完成：关键数据未取得，证据不足。", [
       {
         id: "broad-search",
@@ -3441,8 +3694,8 @@ function testFinalIsBlockedUntilPlannedTasksReachTerminalState() {
         verificationStatus: "unverified"
       }
     ]).status,
-    "blocked",
-    "explicitly partial finals with exhausted evidence gaps should keep the goal blocked"
+    "completed",
+    "final status must be derived from task graph state, not conservative markdown wording"
   );
 }
 
@@ -3454,6 +3707,8 @@ async function main() {
   testWebToolWorkerLimitsMultiQueryResultReads();
   testWebToolWorkerRemovesGenericSearchCommandPrefixes();
   testWebToolWorkerUsesQuotedPromptQueriesWhenInputMissing();
+  testWebToolWorkerIgnoresStructuredQueryLabels();
+  testMetaVerificationTaskDoesNotInferWebWorkerFromGoalMessages();
   testReadOnlyNewsMetadataDoesNotForceCodexCli();
   testReadOnlyPublicUrlBrowserTaskIsRoutedToWebTool();
   testReadOnlyUrlWithTypeQueryParamDoesNotForceBrowserWorker();
@@ -3495,6 +3750,7 @@ async function main() {
   testBrowserAutomationKeywordDoesNotForceLocalExecution();
   testPlannerKeepsMetaTasksOutOfCodexCli();
   testBaselineBrowserPlanUsesLowRiskBrowserTask();
+  testBaselineLocalReadPlanUsesFilesWorker();
   testDanglingDependenciesArePrunedAfterConstraints();
   testRedundantVerifiedEvidenceTasksArePruned();
   testLogicalDuplicateTasksArePrunedWithinBatch();
@@ -3515,15 +3771,19 @@ async function main() {
   testWebSearchVerificationRejectsMismatchedWorkerQueryForAlternatives();
   testDistinctMultiQueryWebSearchRequiresEveryClause();
   testReadOnlyWebReadRejectsGenericErrorShell();
-  testMultiQueryWebSearchVerificationRejectsUnrelatedClauseEvidence();
+  testMultiQueryWebSearchVerificationMarksOnlyMissingClauseAsEvidenceGap();
   testReadOnlyWebSearchVerificationMatchesMixedCjkNumericEvidence();
   testInteractiveRunsDoNotTriggerUnattendedNightEscalation();
   await testDeepSeekReasoningContentIsParsedAsModelContent();
+  await testFunctionCallingArgumentsAreParsedAsModelContent();
+  await testLegacyFunctionCallIsNotParsedAsModelContent();
   testModelSummaryWithoutEvidenceStaysUnverified();
   testArrayEvidenceIsTreatedAsModelClaims();
-  testSemanticOnlyEvidenceIsTreatedAsModelClaim();
+  testSemanticOnlyEvidenceIsAcceptedForSemanticAnalysis();
+  testVerificationPolicyThresholdsAreRuntimeConfigurable();
   testVerifierModelIsSkippedForPlanningMetaTasks();
-  testPartialFinalWithFailedEvidenceDoesNotMarkGoalCompleted();
+  testVerifierModelEvidenceGapsDoNotHardBlockAutonomousRecovery();
+  testFinalStatusUsesTaskGraphInsteadOfMarkdownGapText();
   testFinalIsBlockedUntilPlannedTasksReachTerminalState();
   console.log("agent orchestration tests passed");
 }

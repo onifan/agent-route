@@ -12,7 +12,7 @@ Four mechanisms govern goal execution: deterministic risk gates, mandatory verif
 
 ## Features
 
-- **Internal agent model routing** - Calls configured OpenAI-compatible upstreams, OAuth providers, or custom upstreams for internal model roles, with connection selection and response-format compatibility.
+- **Internal agent model routing** - Calls model APIs configured in the console for internal model roles. Supported providers are OpenAI, Claude, Gemini, Grok, DeepSeek, Qwen, GLM, and Kimi, each with an API key and optional third-party base URL.
 - **Goal-driven agents** - Generates strategies, task graphs, worker executions, evidence, verification, reviews, and final answers from a goal.
 - **Task state machine and execution graph** - Centrally manages task lifecycles and calculates readiness from dependencies.
 - **Risk system** - Applies deterministic risk evaluation before shell, file, browser, web, and codex-cli tool execution; unapproved high or critical actions do not run.
@@ -44,13 +44,11 @@ Open the console: <http://localhost:20128/agent-route>
 
 **Minimal internal model configuration** for commander, planner, worker, verifier, and finalizer calls:
 
-```bash
-export AGENT_ROUTE_UPSTREAM_CHAT_URL="https://your-openai-compatible-endpoint/v1/chat/completions"
-export AGENT_ROUTE_UPSTREAM_API_KEY="<your-api-key>"
-npm run dev
-```
+1. Open <http://localhost:20128/agent-route#model-apis>.
+2. Enable the provider you want to use.
+3. Set its API key, base URL, default model, and model list.
 
-Alternatively, add an enabled OpenAI-compatible provider connection directly from the `/agent-route` console or provider administration page.
+OpenAI-compatible providers use `/chat/completions`; Claude uses Anthropic Messages and is translated internally. The old provider/OAuth administration flow and generic upstream environment-variable fallback are removed.
 
 **Production build and startup:**
 
@@ -99,11 +97,10 @@ npm test                 # run all tests under src
 
 ## Pages
 
-| Page                      | URL                    | Description                                                                                                       |
-| ------------------------- | ---------------------- | ----------------------------------------------------------------------------------------------------------------- |
-| Console / runtime monitor | `/agent-route`         | Create and run goals; inspect the chat event stream, task graph, budget, risk, verification, and recovery summary |
-| Provider administration   | `/dashboard/providers` | Configure internal model provider connections and nodes                                                           |
-| OAuth callback            | `/callback`            | Handle provider OAuth authorization callbacks                                                                     |
+| Page                      | URL                       | Description                                                                                                       |
+| ------------------------- | ------------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| Console / runtime monitor | `/agent-route`            | Create and run goals; inspect the chat event stream, task graph, budget, risk, verification, and recovery summary |
+| Model API settings        | `/agent-route#model-apis` | Configure OpenAI, Claude, Gemini, Grok, DeepSeek, Qwen, GLM, and Kimi API keys, base URLs, and model lists        |
 
 ---
 

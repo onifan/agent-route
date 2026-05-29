@@ -4,6 +4,8 @@
 
 不直接实现风险规则、验证规则、预算规则或普通模型 provider 代理。旧 `src/agent-route.js` 只聚合这里的目标驱动入口以保持 API 兼容。
 
+所有通过内部 chat/completions 调用的结构化模型阶段均强制使用指定 function calling；运行时只解析相应的 `tool_calls[].function.arguments`，不会回退到文本 JSON、旧 `function_call` 或 `response_format`。
+
 当前拆分：
 
 - `planner.js`：规划提示词、baseline plan helper、plan 规范化。
@@ -25,7 +27,7 @@
 - `finalizer.js`：最终回答提示词与 final synthesis 收尾流程。
 - `task-context.js`：单个任务执行前的运行状态与 worker memory/model pool 上下文准备。
 - `task-gates.js`：`startTask` 后的风险/预算门禁结果处理。
-- `worker-dispatcher.js`：按 task worker 类型分发到 codex-cli 或模型池。
+- `worker-dispatcher.js`：按 task worker 类型分发到 files / web / document / browser / codex-cli 或模型池。
 - `worker-result-processor.js`：worker result 标准化与 budget usage 记录。
 - `task-verification-step.js`：worker success 后的 verification step 编排。
 - `task-state-updater.js`：应用 worker/verification 结果、重试调度、事件与 memory 发布。
